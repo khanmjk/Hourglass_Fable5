@@ -43,34 +43,42 @@ Flipping is faithful to a real hourglass: flip it mid-run and the new run lasts 
 long as the sand that made it to the top (flip a 1-minute glass at 40s and you get a
 ~40-second timer back).
 
-The amount of sand scales with the duration — a 1-minute glass holds 600 grains, a
-5-minute+ glass holds 2,400 — so the neck always flows at a physically plausible rate
-(~10 grains/second) instead of an impossible torrent.
+The glass always holds ~2,000 grains regardless of duration — only the metering rate
+changes (a 1-minute timer streams ~32 grains/second; a 60-minute timer drips one every
+~2 seconds, exactly like a real hourglass with finer sand and more patience).
 
-## How it works
+## How it works (V2)
 
-- **Rendering** — three.js `InstancedMesh` (one draw call for all grains), physical
-  glass material with transmission, PMREM room environment, soft shadows.
-- **Physics** — each grain is a Rapier dynamic rigid body with a ball collider. The
-  glass interior is ~780 *thick convex boxes* arranged in rings that trace the lathe
-  profile (zero-thickness trimeshes eject grains under pile pressure; solid walls
-  can't). The world is built at 10× scale so grain radii sit near Rapier's solver
-  tolerances, with gravity scaled to match — every fall time is identical to real time.
-- **Perfect timing** — an invisible "gate" collider sits in the neck. Grains in the
-  `HELD` collision group rest on it; releasing a grain moves it to a `FALLING` group
-  that ignores the gate. A controller releases grains so that the count through the
-  neck tracks `N · t / T` against the wall clock. Jams (real granular arching!) get a
-  gentle "tap the glass" impulse, and any grain stuck longer than ~1.6s is invisibly
-  teleported through the 1.3-unit-wide throat — the clock is always authoritative.
+- **Rendering** — three.js `InstancedMesh` (one draw call for all grains), faceted
+  flat-shaded grains with a palette-jittered sand tone per instance, physical glass
+  with transmission, PMREM room environment, soft shadows.
+- **Physics** — each grain is a Rapier (SIMD WASM) dynamic rigid body with a ball
+  collider. The glass interior is ~780 *thick convex boxes* arranged in rings that
+  trace the lathe profile (zero-thickness trimeshes eject grains under pile pressure;
+  solid walls can't — zero escapes across all testing). The world is built at 10×
+  scale so grain radii sit near Rapier's solver tolerances. Grain radius is derived
+  from the cavity volume so ~2,000 grains always fill the bulb to the same line.
+- **Perfect timing: the freeze-plug** *(control-plane design adopted from the
+  [Opus 4.8 build](https://github.com/khanmjk/Hourglass_Opus48) of this benchmark)* —
+  unreleased grains sinking into the throat column are pinned as `Fixed` bodies: a
+  self-forming plug the pile rests on, costing the solver nothing. Each frame the
+  meter releases `round(N·t/T)` minus already-released grains by unpinning the plug
+  bottom-first and hopping each grain invisibly across the ~1-unit throat with a
+  small downward velocity. The fall, the stream and the heap are all real simulation;
+  the wall clock owns only *when* each grain crosses. No arching, no jams, no stalls
+  — by construction.
 - **The flip** — the physics world never rotates. The *rendered* rig rotates by θ while
   physics gravity is set to `Rz(−θ)·(0,−g,0)` each frame — the exact equivalent frame
-  of a fixed camera watching the glass turn. Sand genuinely tumbles during the turn.
-- **Sleep management** — settled grains sleep (that's the performance budget). Rapier
-  never wakes bodies when their support disappears, so a funnel-region wake runs while
-  draining and a spatial-hash sweep wakes any grain left floating over a crater.
+  of a fixed camera watching the glass turn. The plug unfreezes first, so the sand
+  genuinely tumbles during the turn.
+- **Performance** — one merged O(N) pass per frame (position cache, velocity clamp,
+  force-sleep, escape rescue, instance sync) that skips frozen and sleeping bodies
+  with a single boolean; targeted feed-zone waking instead of global wakes. Steady
+  state simulates only the falling stream and the two active pile fronts —
+  typically 15–300 awake bodies out of ~2,000, at 120 fps.
 - **Background tabs** — if the tab is throttled, the wall clock stays authoritative:
-  the controller teleports the backlog through the neck and the sand level is correct
-  when you come back.
+  the release budget absorbs the backlog (bursts stack into vertical bands below the
+  neck) and the sand level is correct when you come back.
 
 ## Pinned libraries
 
@@ -92,13 +100,30 @@ LICENSE           MIT
 
 ## Known trade-offs
 
-- The rigid-body budget caps at 2,400 grains, so a 60-minute glass drips
-  ~0.7 grains/second — honest physics for grains of this size rather than a
-  faked continuous stream.
+- The neck crossing is metered, not emergent: grains hop the ~1-unit throat
+  invisibly. Justified by Beverloo's law (real hourglasses drain at a constant,
+  head-independent rate), and it is what makes 1-minute and 60-minute timers share
+  one glass — but it is an honest asterisk. Everything you can actually *see* —
+  falling, funnelling, heaping, tumbling — is genuine rigid-body simulation.
+- A 60-minute glass drips ~one grain per 2 seconds — honest pacing for ~2,000
+  grains rather than a faked continuous stream.
 - Rapier 0.19.3 logs a harmless `deprecated parameters` warning during WASM
   init (upstream issue, no effect).
-- In heavily throttled/background tabs the sand reconciles via the invisible
-  catch-up path; the countdown itself is always wall-clock exact.
+- In heavily throttled/background tabs the sand reconciles via banded catch-up
+  releases; the countdown itself is always wall-clock exact.
+
+## V1 → V2
+
+V1 (see git history) metered sand through a collision-filtered gate that grains
+physically squeezed past. Real granular arching jammed it, and fighting the jams
+kept too many bodies awake — long presets became unplayable. V2 adopts the
+freeze-plug + release-budget control plane pioneered by the
+[Opus 4.8 implementation](https://github.com/khanmjk/Hourglass_Opus48), while
+keeping this build's distinctives: single file with no build step, watertight
+convex-box walls (zero escapes), a live physics flip where the sand actually
+tumbles, pause that freezes the world, and sound. Also new in V2: constant grain
+count with volume-derived radius, faceted gritty grains, instant preset switching,
+and no idle camera auto-rotation.
 
 ## License
 

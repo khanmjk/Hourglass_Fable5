@@ -131,7 +131,7 @@
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
     "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/",
-    "@dimforge/rapier3d-compat": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/rapier.mjs"
+    "@dimforge/rapier3d-simd-compat": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-simd-compat@0.19.3/rapier.mjs"
   }
 }
 </script>
@@ -139,7 +139,7 @@
 <body>
 <canvas id="scene"></canvas>
 
-<header><h1>HOURGLASS<span>A DIGITAL TWIN</span></h1></header>
+<header><h1>HOURGLASS<span>A DIGITAL TWIN · V2</span></h1></header>
 
 <div id="readout">
   <div id="clock">01:00</div>
@@ -154,7 +154,7 @@
     <button class="chip active" data-secs="60">1 min</button>
     <button class="chip" data-secs="300">5 min</button>
     <button class="chip" data-secs="3600">60 min</button>
-    <input id="customMin" type="number" min="0.1" max="180" step="any" placeholder="min" title="custom minutes" />
+    <input id="customMin" type="number" min="0.25" max="180" step="any" placeholder="min" title="custom minutes" />
   </div>
   <div class="row">
     <button class="btn primary" id="startBtn">Start</button>
@@ -178,54 +178,84 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import * as RAPIER_NS from '@dimforge/rapier3d-compat';
+import * as RAPIER_NS from '@dimforge/rapier3d-simd-compat';
 const RAPIER = RAPIER_NS.default ?? RAPIER_NS;
 
 /* ============================================================ *
- *  Constants.
- *  The world is built at 10x real scale (1 unit = 10 cm) so
- *  grain radii sit near Rapier's ~1-unit solver tolerances —
- *  tiny grains at true scale give mushy contacts and broken
- *  sleeping. Gravity is scaled by the same factor, which keeps
- *  every fall time identical to real time.
+ *  V2 — the control plane changed, the physics stayed honest.
+ *
+ *  V1 metered the sand with a collision-filtered gate that grains
+ *  physically squeezed past. Real granular arching jammed it, and
+ *  keeping the funnel awake to fight the jams melted the frame
+ *  budget at high grain counts. V2 adopts the "freeze-plug"
+ *  architecture (credit: the Opus 4.8 build of this benchmark):
+ *
+ *  - grains sinking into the throat column are pinned as Fixed
+ *    bodies — a self-forming plug the pile rests on. Fixed and
+ *    sleeping bodies cost the solver nothing.
+ *  - releasing a grain = unpin + move it across the throat to just
+ *    below the neck with a small downward velocity. The ~1-unit
+ *    hop is invisible inside the waist; the fall, the stream and
+ *    the heap are all real simulation.
+ *  - the wall clock owns the release count (N·t/T). Physics is
+ *    only asked to do what it is good at.
+ *
+ *  Grain count is now constant (quality), decoupled from duration;
+ *  the radius is derived from the cavity volume so the bulb always
+ *  fills to the same line.
+ *
+ *  The world is built at 10x real scale (1 unit = 10 cm) so grain
+ *  radii sit near Rapier's solver tolerances.
  * ============================================================ */
-const G        = 98.1;    // 9.81 m/s² at 10x length scale
+const G        = 75;      // slightly gentle gravity: calmer grains sleep sooner
 const H        = 15.5;    // interior half-height of the glass
 const BULB_R   = 10.5;    // widest interior radius
 const NECK_R   = 1.3;     // interior radius at the waist
 const CAP_R    = 5.2;     // interior radius where glass meets the wooden caps
 const WAIST_Y  = 0.62 * H;
-const GRAIN_R  = 0.45;
+const THROAT_H = 0.6;     // half-height of the narrow throat region
 
-const DT              = 1 / 120;
-const MAX_STEPS       = 5;       // physics catch-up cap per frame
-const V_MAX           = 60;      // velocity clamp: V_MAX*DT ≈ 1.1*GRAIN_R (anti-tunnel)
-const GRAINS_MAX      = 2400;
-const GRAINS_MIN      = 150;
-const RATE_TARGET     = 10;      // grains/sec the neck passes comfortably
-const CROSS_Y         = 1.2;     // grain has "passed" once y*orient < -CROSS_Y
-const REGROUP_Y       = 2.4;     // safe to re-enter HELD group (clear of the gate)
-const GATE_HH         = 0.3;     // gate half-height
-const RELEASES_MAX    = 6;       // per frame, normal path
-const INFLIGHT_CAP    = 18;
-const CATCHUP_DEFICIT = 30;      // beyond this, teleport instead of simulate
-const TRANSIT_S       = 0.9;     // mean neck→pile transit; schedule finishes early by this
-
-// Rapier collision groups: high 16 bits = membership, low 16 = filter.
-const G_WALL = 0x1, G_GATE = 0x2, G_HELD = 0x4, G_FALL = 0x8;
-const GRP_WALL = (G_WALL << 16) | (G_HELD | G_FALL);
-const GRP_GATE = (G_GATE << 16) | G_HELD;
-const GRP_HELD = (G_HELD << 16) | (G_WALL | G_GATE | G_HELD | G_FALL);
-const GRP_FALL = (G_FALL << 16) | (G_WALL | G_HELD | G_FALL);
+const GRAINS_N   = 2000;
+const PACKING    = 0.62;  // random close packing of spheres
+const DT         = 1 / 120;
+const MAX_STEPS  = 3;     // shed backlog beyond this — never spiral
+const V_MAX      = 60;    // clamp: V_MAX*DT ≈ 1.05 grain radii (anti-tunnel)
+const SLEEP_SP2  = 0.25;  // force-sleep below 0.5 units/s
+const TRANSIT_S  = 0.9;   // mean neck→pile fall time; schedule finishes early
+const REL_CAP    = 60;    // max releases per frame (tab-resume catch-up)
+const BANDS      = 12;    // same-frame bursts stack into vertical bands
 
 /* Interior radius of the glass at height |y| — one profile drives the
-   visual lathe, the physics walls and the grain spawner. */
+   visual lathe, the physics walls and the grain seeding. */
 function profileR(u) {
   const smooth = (t) => t * t * (3 - 2 * t);
   if (u <= WAIST_Y) return NECK_R + (BULB_R - NECK_R) * smooth(u / WAIST_Y);
   const t = Math.min(1, (u - WAIST_Y) / (H - WAIST_Y));
   return BULB_R + (CAP_R - BULB_R) * smooth(t);
 }
+
+/* Grain radius derived from the fill volume, so N grains always fill the
+   bulb to the same line. */
+function grainRadiusFor(count) {
+  const yTop = H * 0.78;
+  let v = 0;
+  const steps = 240;
+  for (let i = 0; i < steps; i++) {
+    const y = THROAT_H + ((yTop - THROAT_H) * (i + 0.5)) / steps;
+    const r = profileR(y);
+    v += Math.PI * r * r * ((yTop - THROAT_H) / steps);
+  }
+  const perGrain = (v * PACKING) / count;
+  const r = Math.cbrt(perGrain / ((4 / 3) * Math.PI));
+  return Math.max(0.3, Math.min(0.62, r));
+}
+const GRAIN_R = grainRadiusFor(GRAINS_N);
+
+// freeze-plug geometry
+const Y_HOLD   = THROAT_H + GRAIN_R * 1.4;          // freeze line
+const HOLD_R2  = (NECK_R * 1.9) ** 2;               // throat column radius²
+const FEED_Y   = THROAT_H + GRAIN_R * 9;            // wake band above the throat
+const FEED_R2  = (NECK_R * 2.2) ** 2;               // central wake column
 
 /* ============================================================ *
  *  DOM
@@ -258,8 +288,6 @@ renderer.domElement.addEventListener('webglcontextlost', (e) => {
 });
 
 const scene = new THREE.Scene();
-// transmission samples the scene's own background — an alpha canvas would
-// render the glass against undefined color, so paint the backdrop in-scene
 scene.background = new THREE.Color(0x0d0f16);
 scene.fog = new THREE.Fog(0x0d0f16, 150, 420);
 const pmrem = new THREE.PMREMGenerator(renderer);
@@ -275,8 +303,7 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.set(0, 0, 0);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
-controls.autoRotate = true;
-controls.autoRotateSpeed = 0.5;
+controls.autoRotate = false; // a real hourglass does not spin on its own
 controls.minDistance = 25;
 controls.maxDistance = 130;
 controls.maxPolarAngle = Math.PI / 2 + 0.25;
@@ -352,20 +379,22 @@ table.position.y = -(H + 1.83) - 1.2;
 table.receiveShadow = true;
 scene.add(table);
 
-/* --- Sand instances --- */
-const grainGeo = new THREE.IcosahedronGeometry(GRAIN_R, 1);
-const grainMat = new THREE.MeshStandardMaterial({ roughness: 0.92, metalness: 0.0 });
-const grainMesh = new THREE.InstancedMesh(grainGeo, grainMat, GRAINS_MAX);
+/* --- Sand instances: faceted, flat-shaded, palette-jittered grit --- */
+const grainGeo = new THREE.IcosahedronGeometry(GRAIN_R, 0);
+const grainMat = new THREE.MeshStandardMaterial({
+  roughness: 0.95, metalness: 0, flatShading: true, envMapIntensity: 0.45,
+});
+const grainMesh = new THREE.InstancedMesh(grainGeo, grainMat, GRAINS_N);
 grainMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 grainMesh.castShadow = true;
 grainMesh.frustumCulled = false;
 {
-  const c = new THREE.Color();
-  for (let i = 0; i < GRAINS_MAX; i++) {
-    const h = 0.085 + (Math.random() - 0.5) * 0.02;
-    const s = 0.52 + (Math.random() - 0.5) * 0.12;
-    const l = 0.60 + (Math.random() - 0.5) * 0.16;
-    c.setHSL(h, s, Math.random() < 0.06 ? l * 0.55 : l);
+  const palette = [0xe8c074, 0xdca85a, 0xf0d089, 0xcf9a4c, 0xe3b366, 0xf5dca0];
+  const c = new THREE.Color(), hsl = {};
+  for (let i = 0; i < GRAINS_N; i++) {
+    c.setHex(palette[(Math.random() * palette.length) | 0]);
+    c.getHSL(hsl);
+    c.setHSL(hsl.h, hsl.s + (Math.random() - 0.5) * 0.05, hsl.l + (Math.random() - 0.5) * 0.09);
     grainMesh.setColorAt(i, c);
   }
   grainMesh.instanceColor.needsUpdate = true;
@@ -375,78 +404,73 @@ rig.add(grainMesh);
 /* ============================================================ *
  *  Physics
  * ============================================================ */
-let world, bodies = [], colliders = [];
+let world, bodies = [];
 let N = 0;
-const posCache = new Float32Array(GRAINS_MAX * 3);
-const mode = new Uint8Array(GRAINS_MAX);      // 0 held, 1 in flight, 2 cooling
-const releasedAt = new Float32Array(GRAINS_MAX);
-const settleCache = new Map();                // grain count -> settled transforms
+const posCache = new Float32Array(GRAINS_N * 3);
+const frozen = new Uint8Array(GRAINS_N);    // pinned as Fixed in the throat plug
+const released = new Uint8Array(GRAINS_N);  // already sent through the neck this run
+const slowFrames = new Uint8Array(GRAINS_N); // consecutive slow frames before force-sleep
+let frozenList = [];                        // release order: last frozen = lowest
+const settleCache = new Map();
 
 /* Glass walls: rings of thick convex cuboids tracing the lathe profile.
-   Zero-thickness trimeshes eject grains under pile pressure (parry has no
-   "inside" to push back from) — solid boxes cannot. */
+   Zero-thickness trimeshes eject grains under pile pressure; solid boxes
+   cannot. Zero escapes across every V1 test run — kept verbatim. */
 function buildStaticColliders() {
   const fixed = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
-  const BANDS = 30, SEGS = 26, WALL_T = 0.9;
+  const WBANDS = 30, SEGS = 26, WALL_T = 0.9;
   const q = new THREE.Quaternion(), basis = new THREE.Matrix4();
   const xA = new THREE.Vector3(), yA = new THREE.Vector3(), zA = new THREE.Vector3();
-  for (let b = 0; b < BANDS; b++) {
-    const y0 = -H + (2 * H * b) / BANDS, y1 = -H + (2 * H * (b + 1)) / BANDS;
+  for (let b = 0; b < WBANDS; b++) {
+    const y0 = -H + (2 * H * b) / WBANDS, y1 = -H + (2 * H * (b + 1)) / WBANDS;
     const r0 = profileR(Math.abs(y0)), r1 = profileR(Math.abs(y1));
     const ym = (y0 + y1) / 2, rm = (r0 + r1) / 2;
     const dr = r1 - r0, dy = y1 - y0;
     const L = Math.hypot(dr, dy);
-    const nu = dy / L, ny = -dr / L;              // outward normal in the (radial, y) plane
+    const nu = dy / L, ny = -dr / L;
     const cu = rm + nu * (WALL_T / 2), cy = ym + ny * (WALL_T / 2);
     const chord = (2 * Math.PI * Math.max(cu, 0.4)) / SEGS;
     for (let s = 0; s < SEGS; s++) {
       const a = (s / SEGS) * Math.PI * 2;
       const ca = Math.cos(a), sa = Math.sin(a);
-      yA.set((dr / L) * ca, dy / L, (dr / L) * sa); // along the profile segment
-      xA.set(-sa, 0, ca);                           // ring tangent
-      zA.crossVectors(xA, yA).normalize();          // wall normal
+      yA.set((dr / L) * ca, dy / L, (dr / L) * sa);
+      xA.set(-sa, 0, ca);
+      zA.crossVectors(xA, yA).normalize();
       basis.makeBasis(xA, yA, zA);
       q.setFromRotationMatrix(basis);
       world.createCollider(
         RAPIER.ColliderDesc.cuboid(chord * 0.62, L / 2 + 0.12, WALL_T / 2)
           .setTranslation(cu * ca, cy, cu * sa)
           .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w })
-          .setFriction(0.22).setRestitution(0)
-          .setCollisionGroups(GRP_WALL),
+          .setFriction(0.55).setRestitution(0.02),
         fixed
       );
     }
   }
-  // end lids (grains reach them when the pile is tall or mid-flip)
   for (const s of [-1, 1]) {
     world.createCollider(
       RAPIER.ColliderDesc.cylinder(0.5, CAP_R + 1.2)
         .setTranslation(0, s * (H + 0.48), 0)
-        .setFriction(0.5).setCollisionGroups(GRP_WALL),
+        .setFriction(0.55).setCollisionGroups(0xffffffff),
       fixed
     );
   }
-  // The gate: an invisible plug in the neck. HELD grains rest on it,
-  // FALLING grains pass straight through. This is the metering valve.
-  world.createCollider(
-    RAPIER.ColliderDesc.cylinder(GATE_HH, NECK_R + 0.5)
-      .setFriction(0.2).setCollisionGroups(GRP_GATE),
-    fixed
-  );
 }
 
-function spawnPositions(target) {
+/* Near-packed seeding: rings at ~touching spacing so the pile is already
+   at settled density and the settle transient is tiny. */
+function seedPositions(count) {
   const out = [];
-  const jit = () => (Math.random() - 0.5) * 0.14;
-  const spacing = GRAIN_R * 2.06;
-  for (let y = 3.0; y < H - 1.2 && out.length < target; y += GRAIN_R * 1.72) {
-    const rMax = profileR(Math.abs(y)) - GRAIN_R - 0.25;
+  const jit = () => (Math.random() - 0.5) * GRAIN_R * 0.6;
+  const spacing = GRAIN_R * 1.96;
+  for (let y = THROAT_H + GRAIN_R; y < H - 1.2 && out.length < count; y += GRAIN_R * 1.75) {
+    const rMax = profileR(Math.abs(y)) - GRAIN_R - 0.15;
     if (rMax <= 0) continue;
-    out.push([jit(), y, jit()]);
-    const a0 = Math.random() * Math.PI * 2;
-    for (let rr = spacing; rr <= rMax && out.length < target; rr += spacing) {
+    out.push([jit() * 0.4, y, jit() * 0.4]);
+    const a0 = y * 3.7;
+    for (let rr = spacing; rr <= rMax && out.length < count; rr += spacing) {
       const n = Math.max(3, Math.floor((Math.PI * 2 * rr) / spacing));
-      for (let k = 0; k < n && out.length < target; k++) {
+      for (let k = 0; k < n && out.length < count; k++) {
         const a = a0 + (k / n) * Math.PI * 2;
         out.push([Math.cos(a) * rr + jit(), y + jit() * 0.4, Math.sin(a) * rr + jit()]);
       }
@@ -455,26 +479,22 @@ function spawnPositions(target) {
   return out;
 }
 
-function buildSand(count) {
-  for (const b of bodies) world.removeRigidBody(b);
-  bodies = []; colliders = [];
-  const pts = spawnPositions(count);
+function buildSand() {
+  const pts = seedPositions(GRAINS_N);
   N = pts.length;
   for (let i = 0; i < N; i++) {
     const [x, y, z] = pts[i];
     const body = world.createRigidBody(
       RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, z)
-        .setLinearDamping(0.2).setAngularDamping(1.5)
-        .setSoftCcdPrediction(GRAIN_R * 3)
+        .setLinearDamping(0.3).setAngularDamping(0.8)
+        .setSoftCcdPrediction(GRAIN_R * 4)
     );
-    const col = world.createCollider(
+    world.createCollider(
       RAPIER.ColliderDesc.ball(GRAIN_R)
-        .setFriction(0.55).setRestitution(0)
-        .setCollisionGroups(GRP_HELD),
+        .setFriction(0.55).setRestitution(0).setDensity(1.4),
       body
     );
-    bodies.push(body); colliders.push(col);
-    mode[i] = 0;
+    bodies.push(body);
     posCache[i * 3] = x; posCache[i * 3 + 1] = y; posCache[i * 3 + 2] = z;
   }
   grainMesh.count = N;
@@ -484,26 +504,162 @@ function buildSand(count) {
  *  App state
  * ============================================================ */
 let state = 'boot';         // boot | settling | ready | running | paused | done
-let baseDuration = 60;      // seconds, from preset
-let effDuration = 60;       // actual run length (shorter after a mid-run flip)
+let baseDuration = 60;
+let effDuration = 60;
 let startStamp = 0, elapsedMs = 0;
-let passed = 0, inFlight = 0, topStart = 0;
+let releasedCount = 0, topStart = 0;
 let orientation = 1;        // +1: top chamber is +Y in physics space
-let thetaBase = 0;          // rig rotation when not mid-flip
+let thetaBase = 0;
 let flipPhase = null;       // null | 'turn' | 'settle'
 let flipT0 = 0, flipSettleT0 = 0;
 const FLIP_MS = 1400, FLIP_SETTLE_MS = 700;
-let escaped = 0;
-const inFlightSet = new Set(), coolingSet = new Set();
-
-const grainBudget = (secs) =>
-  Math.max(GRAINS_MIN, Math.min(GRAINS_MAX, Math.round(secs * RATE_TARGET)));
+let escaped = 0, relRate = 0;
 
 function setGravity(gx, gy) {
   world.gravity.x = gx; world.gravity.y = gy; world.gravity.z = 0;
 }
 
-/* ---------- settle: run physics until the pile is quiet ---------- */
+/* ---------- freeze-plug ---------- */
+function freeze(i) {
+  bodies[i].setBodyType(RAPIER.RigidBodyType.Fixed, false);
+  frozen[i] = 1;
+  frozenList.push(i);
+}
+function unfreeze(i, wake) {
+  bodies[i].setBodyType(RAPIER.RigidBodyType.Dynamic, wake);
+  frozen[i] = 0;
+}
+function unfreezeAll() {
+  for (let i = 0; i < N; i++) if (frozen[i]) unfreeze(i, true);
+  frozenList = [];
+}
+
+/* Freeze any unreleased grain that has sunk into the throat column.
+   Called on live frames and periodically during settle — this IS the plug
+   that keeps the hourglass from draining on its own. */
+function freezePass() {
+  for (let i = 0; i < N; i++) {
+    if (frozen[i] || released[i]) continue;
+    const yo = posCache[i * 3 + 1] * orientation;
+    if (yo > Y_HOLD) continue;
+    const x = posCache[i * 3], z = posCache[i * 3 + 2];
+    if (x * x + z * z < HOLD_R2) freeze(i);
+  }
+}
+
+/* Release = the magician's sleeve: hop the grain across the throat to a
+   tight spot just below the neck and let gravity do the rest. Same-frame
+   bursts stack into vertical bands so catch-up never spawns a clump. */
+function dropThroughNeck(i, burstIdx) {
+  const band = burstIdx % BANDS; // same-frame bursts go deeper; a lone release sits just below the throat
+  const a = Math.random() * Math.PI * 2;
+  const rr = Math.random() * NECK_R * 0.4;
+  if (frozen[i]) unfreeze(i, true);
+  bodies[i].setTranslation({
+    x: Math.cos(a) * rr,
+    y: -(THROAT_H + GRAIN_R * 1.6 + band * GRAIN_R * 2.2) * orientation,
+    z: Math.sin(a) * rr,
+  }, true);
+  bodies[i].setLinvel({
+    x: (Math.random() - 0.5) * 1.5,
+    y: -3 * orientation,
+    z: (Math.random() - 0.5) * 1.5,
+  }, true);
+  bodies[i].setAngvel({ x: 0, y: 0, z: 0 }, false);
+  released[i] = 1;
+  releasedCount++;
+}
+
+/* Wake the feed zone above the throat so the pile keeps slumping into the
+   plug — a narrow band + central column, never the whole pile. */
+function wakeFeedZone() {
+  for (let i = 0; i < N; i++) {
+    if (frozen[i] || released[i]) continue;
+    const yo = posCache[i * 3 + 1] * orientation;
+    if (yo < 0) continue;
+    const x = posCache[i * 3], z = posCache[i * 3 + 2];
+    const r2 = x * x + z * z;
+    if (yo < FEED_Y || r2 < FEED_R2) bodies[i].wakeUp();
+  }
+}
+
+/* The metering contract: by progress p, round(topStart·p) grains must have
+   been released. Pop the plug first (its last entries ARE the lowest
+   grains); fall back to the lowest cached unreleased grain. */
+function meter(now, complete = false) {
+  if (!complete) elapsedMs = now - startStamp;
+  const p = complete ? 1 : Math.min(1, (elapsedMs / 1000) / Math.max(0.5, effDuration - TRANSIT_S));
+  const target = complete ? topStart : Math.round(topStart * p);
+  let need = Math.min(REL_CAP, target - releasedCount);
+  let releasedNow = 0;
+  if (need > 0) {
+    while (need > 0 && frozenList.length) {
+      const i = frozenList.pop();
+      if (released[i] || !frozen[i]) continue;
+      dropThroughNeck(i, releasedNow);
+      need--; releasedNow++;
+    }
+    if (need > 0) {
+      // plug is empty — release the lowest unreleased grains directly
+      const cands = [];
+      for (let i = 0; i < N; i++) if (!released[i]) cands.push(i);
+      cands.sort((a, b) => posCache[a * 3 + 1] * orientation - posCache[b * 3 + 1] * orientation);
+      for (let k = 0; k < cands.length && need > 0; k++) {
+        dropThroughNeck(cands[k], releasedNow);
+        need--; releasedNow++;
+      }
+    }
+    if (releasedNow > 0) wakeFeedZone();
+  }
+  // EMA must decay on no-release frames too, or slow drips read as a torrent
+  relRate = relRate * 0.92 + releasedNow * 60 * 0.08;
+}
+
+/* ---------- the merged O(N) pass: cache + clamp + sleep + rescue + sync ---------- */
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _s = new THREE.Vector3(1, 1, 1);
+function postStep(force = false) {
+  let dirty = false;
+  const maxSq = V_MAX * V_MAX;
+  for (let i = 0; i < N; i++) {
+    const b = bodies[i];
+    if (!force && (frozen[i] || b.isSleeping())) continue;
+    const t = b.translation(), r = b.rotation();
+    posCache[i * 3] = t.x; posCache[i * 3 + 1] = t.y; posCache[i * 3 + 2] = t.z;
+    if (!frozen[i]) {
+      const v = b.linvel();
+      const sq = v.x * v.x + v.y * v.y + v.z * v.z;
+      if (sq > maxSq) {
+        const s = V_MAX / Math.sqrt(sq);
+        b.setLinvel({ x: v.x * s, y: v.y * s, z: v.z * s }, true);
+        slowFrames[i] = 0;
+      } else if (!force && sq < SLEEP_SP2 && state !== 'settling' && !flipPhase) {
+        // require sustained slowness — a ballistic apex is slow for only ~one frame,
+        // and sleeping a grain mid-air leaves it hanging there
+        if (++slowFrames[i] >= 4) { b.sleep(); slowFrames[i] = 0; }
+      } else {
+        slowFrames[i] = 0;
+      }
+      // radial containment — the glass is a lathe, "inside" is a 2D test
+      const rxz = Math.hypot(t.x, t.z);
+      if (rxz > profileR(Math.min(Math.abs(t.y), H)) + GRAIN_R * 2 || Math.abs(t.y) > H + 1.5) {
+        escaped++;
+        const yc = THREE.MathUtils.clamp(t.y, -H + 1, H - 1);
+        const rSafe = Math.max(0.1, profileR(Math.abs(yc)) * 0.5);
+        const sc = rxz > 1e-4 ? rSafe / rxz : 0;
+        b.setTranslation({ x: t.x * sc, y: yc, z: t.z * sc }, true);
+        b.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      }
+    }
+    _v.set(t.x, t.y, t.z);
+    _q.set(r.x, r.y, r.z, r.w);
+    _m.compose(_v, _q, _s);
+    grainMesh.setMatrixAt(i, _m);
+    dirty = true;
+  }
+  if (dirty) grainMesh.instanceMatrix.needsUpdate = true;
+}
+
+/* ---------- settle (boot only — seeding is near-packed already) ---------- */
 let settle = null;
 function beginSettle(nextState) {
   state = 'settling';
@@ -515,27 +671,27 @@ function beginSettle(nextState) {
   updateButtons();
 }
 function settleTick(gap) {
-  // throttled tabs deliver sparse frames — do proportionally more work per tick
-  const n = Math.max(14, Math.min(240, Math.round(gap / DT) + 4));
-  for (let k = 0; k < n; k++) { world.step(); settle.steps++; }
-  clampVelocities();
-  overlayBar.style.width = Math.min(100, (settle.steps / 820) * 100) + '%';
-  if (settle.steps < 260) return;
+  const n = Math.max(10, Math.min(160, Math.round(gap / DT) + 4));
+  for (let k = 0; k < n; k++) {
+    world.step();
+    settle.steps++;
+    if (settle.steps % 7 === 0) { postStep(); freezePass(); }
+  }
+  postStep(); freezePass();
+  overlayBar.style.width = Math.min(100, (settle.steps / 420) * 100) + '%';
+  if (settle.steps < 180) return;
   let maxV = 0;
   for (let i = 0; i < N; i++) {
-    if (bodies[i].isSleeping()) continue;
+    if (frozen[i] || bodies[i].isSleeping()) continue;
     const v = bodies[i].linvel();
     maxV = Math.max(maxV, v.x * v.x + v.y * v.y + v.z * v.z);
   }
-  if (maxV < 0.4 || settle.steps > 1800) {
-    const cache = new Float32Array(N * 7);
-    let leaked = 0;
+  if (maxV < 0.6 || settle.steps > 900) {
+    const cache = new Float32Array(N * 8);
     for (let i = 0; i < N; i++) {
       const t = bodies[i].translation(), r = bodies[i].rotation();
-      cache.set([t.x, t.y, t.z, r.x, r.y, r.z, r.w], i * 7);
-      if (t.y < 0) leaked++;
+      cache.set([t.x, t.y, t.z, r.x, r.y, r.z, r.w, frozen[i]], i * 8);
     }
-    if (leaked) console.warn(`gate leak during settle: ${leaked} grains below the neck`);
     settleCache.set(N, cache);
     const next = settle.next;
     settle = null;
@@ -550,160 +706,52 @@ function restoreFromCache() {
   const cache = settleCache.get(N);
   if (!cache) return false;
   for (let i = 0; i < N; i++) {
-    const o = i * 7;
+    const o = i * 8;
+    if (frozen[i]) unfreeze(i, false);
     bodies[i].setTranslation({ x: cache[o], y: cache[o + 1], z: cache[o + 2] }, false);
     bodies[i].setRotation({ x: cache[o + 3], y: cache[o + 4], z: cache[o + 5], w: cache[o + 6] }, false);
     bodies[i].setLinvel({ x: 0, y: 0, z: 0 }, false);
     bodies[i].setAngvel({ x: 0, y: 0, z: 0 }, false);
-    colliders[i].setCollisionGroups(GRP_HELD);
-    bodies[i].sleep();
-    mode[i] = 0;
+    released[i] = 0;
     posCache[i * 3] = cache[o]; posCache[i * 3 + 1] = cache[o + 1]; posCache[i * 3 + 2] = cache[o + 2];
+  }
+  frozenList = [];
+  for (let i = 0; i < N; i++) {
+    if (cache[i * 8 + 7]) freeze(i);
+    else bodies[i].sleep();
   }
   return true;
 }
 
 function enterReady() {
   state = 'ready';
-  passed = 0; inFlight = 0; elapsedMs = 0;
-  inFlightSet.clear(); coolingSet.clear();
+  releasedCount = 0; elapsedMs = 0; relRate = 0;
   topStart = N;
   effDuration = baseDuration;
   clockEl.classList.remove('done');
-  syncInstances(true);
+  postStep(true);
   updateButtons(); setStatus('ready');
 }
 
 function applyDuration(secs) {
   baseDuration = secs;
-  const want = grainBudget(secs);
-  thetaBase = 0; orientation = 1; rig.rotation.z = 0; setGravity(0, -G);
-  flipPhase = null;
-  if (Math.abs(want - N) > 40) {
-    buildSand(want);
-    if (restoreFromCache()) enterReady();
-    else beginSettle('ready');
-  } else if (restoreFromCache()) {
-    enterReady();
-  } else {
-    beginSettle('ready');
-  }
+  fullReset();
 }
 
 function fullReset() {
+  if (!world) return; // R pressed during the boot await
   thetaBase = 0; orientation = 1; rig.rotation.z = 0; setGravity(0, -G);
   flipPhase = null;
   if (!restoreFromCache()) { beginSettle('ready'); return; }
   enterReady();
 }
 
-/* ---------- metering controller ---------- */
+/* ---------- run ---------- */
 function beginRun() {
   startStamp = performance.now();
   state = 'running';
   ensureAudio();
   updateButtons(); setStatus('flowing');
-}
-
-function findCandidate(wide) {
-  const rimSq = wide ? 4.8 * 4.8 : 3.2 * 3.2;
-  const yMax = wide ? 11 : 6.5;
-  let best = -1, bestY = Infinity;
-  for (let i = 0; i < N; i++) {
-    if (mode[i] !== 0) continue;
-    const x = posCache[i * 3], y = posCache[i * 3 + 1] * orientation, z = posCache[i * 3 + 2];
-    if (y < 0.35 || y > yMax) continue;
-    if (x * x + z * z > rimSq) continue;
-    if (y < bestY) { bestY = y; best = i; }
-  }
-  return best;
-}
-
-function release(i, now) {
-  colliders[i].setCollisionGroups(GRP_FALL);
-  bodies[i].wakeUp();
-  mode[i] = 1;
-  releasedAt[i] = now;
-  inFlightSet.add(i);
-  inFlight++;
-}
-
-/* Teleport a grain to just below the gate — the invisible backstop for
-   jams, tab-throttle catch-up and end-of-run stragglers. The throat is
-   1.3 units wide; nobody can see it happen. */
-function dropThrough(i, now) {
-  bodies[i].setTranslation({
-    x: (Math.random() - 0.5) * 1.6,
-    y: -(REGROUP_Y + 0.4) * orientation,
-    z: (Math.random() - 0.5) * 1.6,
-  }, true);
-  // lateral scatter so consecutive drops don't stack into towers
-  bodies[i].setLinvel({ x: (Math.random() - 0.5) * 5, y: -10 * orientation, z: (Math.random() - 0.5) * 5 }, true);
-  colliders[i].setCollisionGroups(GRP_FALL);
-  bodies[i].wakeUp();
-  mode[i] = 1;
-  releasedAt[i] = now;
-  inFlightSet.add(i);
-  inFlight++;
-}
-
-let lastWake = 0, lastJiggle = 0;
-function wakeFunnel(now) {
-  lastWake = now;
-  for (let i = 0; i < N; i++) {
-    if (mode[i] !== 0) continue;
-    const x = posCache[i * 3], y = posCache[i * 3 + 1] * orientation, z = posCache[i * 3 + 2];
-    if (y > 0 && y < 8.5 && x * x + z * z < 25) bodies[i].wakeUp();
-  }
-}
-function jiggle(now) {
-  if (now - lastJiggle < 350) return;
-  lastJiggle = now;
-  for (let i = 0; i < N; i++) {
-    const x = posCache[i * 3], y = posCache[i * 3 + 1] * orientation, z = posCache[i * 3 + 2];
-    if (y > 0 && y < 4 && x * x + z * z < 9) {
-      const b = bodies[i];
-      b.wakeUp();
-      const m = b.mass();
-      b.applyImpulse({ x: (Math.random() - 0.5) * m * 1.4, y: 0, z: (Math.random() - 0.5) * m * 1.4 }, true);
-    }
-  }
-}
-
-function meterTick(now) {
-  elapsedMs = now - startStamp;
-  const elapsed = elapsedMs / 1000;
-  // schedule finishes TRANSIT_S early so the last grain lands near 0:00
-  const denom = Math.max(1, effDuration - TRANSIT_S);
-  const expected = Math.min(topStart, topStart * (elapsed / denom));
-  let deficit = expected - (passed + inFlight);
-
-  if (deficit > CATCHUP_DEFICIT) {
-    // tab was hidden or the sim stalled: teleport the backlog through
-    let n = 0;
-    while (deficit > 10 && n < 20) {
-      const i = findCandidate(true);
-      if (i < 0) break;
-      dropThrough(i, now);
-      deficit--; n++;
-    }
-  } else {
-    let released = 0, jammed = false;
-    while (deficit >= 1 && released < RELEASES_MAX && inFlight < INFLIGHT_CAP) {
-      let i = findCandidate(false);
-      if (i < 0) i = findCandidate(true);
-      if (i < 0) { jammed = true; break; }
-      release(i, now);
-      deficit--; released++;
-    }
-    if (jammed || deficit >= 4) { wakeFunnel(now); jiggle(now); }
-  }
-
-  if (now - lastWake > 320) wakeFunnel(now);
-  // last stretch: keep every remaining top grain live so none strand on the slope
-  if (effDuration - elapsed < Math.max(2, effDuration * 0.05)) wakeFunnel(now);
-
-  if (elapsed >= effDuration) finishRun();
 }
 
 function finishRun() {
@@ -713,122 +761,16 @@ function finishRun() {
   updateButtons(); setStatus("time's up — flip to restart");
 }
 
-/* crossing counts, cooling, jam timeouts, straggler drain, containment */
-function trackGrains(now) {
-  for (const i of inFlightSet) {
-    const yo = posCache[i * 3 + 1] * orientation;
-    if (yo < -CROSS_Y) {
-      inFlightSet.delete(i);
-      passed++; inFlight--;
-      mode[i] = 2;
-      coolingSet.add(i);
-    } else if (now - releasedAt[i] > 1600) {
-      // arched/jammed in the throat: the clock is authoritative — pull it through
-      dropThrough(i, now);
-      inFlight--; // dropThrough re-adds
-      releasedAt[i] = now;
-    }
-  }
-  for (const i of coolingSet) {
-    const yo = posCache[i * 3 + 1] * orientation;
-    if (yo < -REGROUP_Y) {
-      const v = bodies[i].linvel();
-      if (v.x * v.x + v.y * v.y + v.z * v.z < 9) {
-        colliders[i].setCollisionGroups(GRP_HELD);
-        mode[i] = 0;
-        coolingSet.delete(i);
-      }
-    }
-  }
-  // once time is up, drain whatever is left on top
-  if (state === 'done') {
-    let n = 0;
-    for (let i = 0; i < N && n < 8; i++) {
-      if (mode[i] === 0 && posCache[i * 3 + 1] * orientation > 0.35) { dropThrough(i, now); n++; }
-    }
-  }
-}
-
-/* radial SDF containment — the glass is a lathe, so "inside" is a 2D test */
-function rescueSweep() {
-  for (let i = 0; i < N; i++) {
-    const x = posCache[i * 3], y = posCache[i * 3 + 1], z = posCache[i * 3 + 2];
-    const rxz = Math.hypot(x, z);
-    const yAbs = Math.min(Math.abs(y), H);
-    if (rxz > profileR(yAbs) + GRAIN_R * 2 || Math.abs(y) > H + 1.5) {
-      escaped++;
-      const yc = THREE.MathUtils.clamp(y, -H + 1, H - 1);
-      const rSafe = Math.max(0.1, profileR(Math.abs(yc)) * 0.5);
-      const s = rxz > 1e-4 ? rSafe / rxz : 0;
-      bodies[i].setTranslation({ x: x * s, y: yc, z: z * s }, true);
-      bodies[i].setLinvel({ x: 0, y: 0, z: 0 }, true);
-    }
-  }
-}
-
-/* Rapier never wakes sleepers when their support vanishes. Find held,
-   sleeping grains with no neighbor on the gravity side and no wall or
-   gate nearby, and wake them so craters can't hang in the air. */
-function supportSweep() {
-  const cells = new Map();
-  const key = (x, y, z) => ((x + 64) << 14) | ((y + 64) << 7) | (z + 64);
-  for (let i = 0; i < N; i++) {
-    const k = key(Math.round(posCache[i * 3]), Math.round(posCache[i * 3 + 1]), Math.round(posCache[i * 3 + 2]));
-    let a = cells.get(k);
-    if (!a) { a = []; cells.set(k, a); }
-    a.push(i);
-  }
-  const reach = GRAIN_R * 2.6;
-  for (let i = 0; i < N; i++) {
-    if (mode[i] !== 0 || !bodies[i].isSleeping()) continue;
-    const x = posCache[i * 3], y = posCache[i * 3 + 1], z = posCache[i * 3 + 2];
-    // craters only form in the draining top chamber; never disturb the bottom pile
-    if (y * orientation < 0.5) continue;
-    // resting on/near the glass wall, the gate, or an end lid?
-    const rxz = Math.hypot(x, z);
-    if (profileR(Math.min(Math.abs(y), H)) - rxz < GRAIN_R * 1.6) continue;
-    if (Math.abs(y) < GATE_HH + GRAIN_R * 1.6 && rxz < NECK_R + 0.6) continue;
-    if (Math.abs(y) > H - GRAIN_R * 1.6) continue;
-    let supported = false;
-    const ix = Math.round(x), iy = Math.round(y), iz = Math.round(z);
-    outer:
-    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
-      const a = cells.get(key(ix + dx, iy + dy, iz + dz));
-      if (!a) continue;
-      for (const j of a) {
-        if (j === i) continue;
-        const drop = (y - posCache[j * 3 + 1]) * orientation; // + means j is on the gravity side
-        if (drop < GRAIN_R * 0.3 || drop > reach) continue;
-        const hx = posCache[j * 3] - x, hz = posCache[j * 3 + 2] - z;
-        if (hx * hx + hz * hz < reach * reach) { supported = true; break outer; }
-      }
-    }
-    if (!supported) bodies[i].wakeUp();
-  }
-}
-
-function clampVelocities() {
-  const maxSq = V_MAX * V_MAX;
-  for (let i = 0; i < N; i++) {
-    if (bodies[i].isSleeping()) continue;
-    const v = bodies[i].linvel();
-    const sq = v.x * v.x + v.y * v.y + v.z * v.z;
-    if (sq > maxSq) {
-      const s = V_MAX / Math.sqrt(sq);
-      bodies[i].setLinvel({ x: v.x * s, y: v.y * s, z: v.z * s }, true);
-    }
-  }
-}
-
 /* ---------- flip ----------
-   Equivalent-frame trick: the physics world never rotates. We rotate the
-   rendered rig by θ and set physics gravity to Rz(−θ)·(0,−g,0), which is
-   exactly what a fixed glass "feels" while the real one turns over. */
+   Equivalent-frame trick: the physics world never rotates. The rendered
+   rig turns by θ while gravity is set to Rz(−θ)·(0,−g,0) — the sand
+   genuinely tumbles. The plug is unfrozen first so it tumbles too. */
 function startFlip() {
   if (flipPhase || state === 'settling' || state === 'boot') return;
   flipPhase = 'turn';
   flipT0 = performance.now();
   ensureAudio();
+  unfreezeAll();
   for (let i = 0; i < N; i++) bodies[i].wakeUp();
   state = 'ready';
   setStatus('flipping');
@@ -841,16 +783,12 @@ function flipTick(now) {
     const theta = thetaBase + e * Math.PI;
     rig.rotation.z = theta;
     setGravity(-G * Math.sin(theta), -G * Math.cos(theta));
-    // sleeping bodies ignore gravity changes entirely — keep everything live
     if ((now - flipT0) % 200 < 34) for (let i = 0; i < N; i++) bodies[i].wakeUp();
     if (t >= 1) {
       thetaBase = (thetaBase + Math.PI) % (2 * Math.PI);
       rig.rotation.z = thetaBase;
       orientation = Math.abs(thetaBase) < 0.1 ? 1 : -1;
       setGravity(0, -G * orientation);
-      inFlightSet.clear(); coolingSet.clear();
-      passed = 0; inFlight = 0;
-      for (let i = 0; i < N; i++) { colliders[i].setCollisionGroups(GRP_HELD); mode[i] = 0; }
       flipPhase = 'settle';
       flipSettleT0 = now;
       setStatus('settling');
@@ -859,8 +797,13 @@ function flipTick(now) {
     if (now - flipSettleT0 < FLIP_SETTLE_MS) return;
     flipPhase = null;
     let top = 0;
-    for (let i = 0; i < N; i++) if (posCache[i * 3 + 1] * orientation > 0.35) top++;
+    for (let i = 0; i < N; i++) {
+      const yo = posCache[i * 3 + 1] * orientation;
+      released[i] = yo > 0.2 ? 0 : 1;
+      if (yo > 0.2) top++;
+    }
     topStart = top;
+    releasedCount = 0;
     clockEl.classList.remove('done');
     if (top === 0) { effDuration = baseDuration; state = 'ready'; setStatus('empty — flip again'); updateButtons(); return; }
     // a real hourglass flipped mid-run only runs for the fraction on top
@@ -894,7 +837,8 @@ function ensureAudio() {
 }
 function updateNoise() {
   if (!noiseGain) return;
-  const target = muted || state !== 'running' ? 0 : Math.min(0.055, inFlight * 0.0035);
+  // the hiss tracks the actual release rate, so what you hear is what flows
+  const target = muted || state !== 'running' ? 0 : Math.min(0.06, relRate * 0.004);
   noiseGain.gain.linearRampToValueAtTime(target, audioCtx.currentTime + 0.12);
 }
 function chime() {
@@ -947,18 +891,14 @@ $('customMin').addEventListener('change', () => {
   const v = parseFloat($('customMin').value);
   if (!Number.isFinite(v) || v <= 0) return;
   document.querySelectorAll('#presets .chip').forEach((c) => c.classList.remove('active'));
-  applyDuration(Math.min(180, Math.max(0.25, v)) * 60); // ≥15s keeps the neck flow physical
+  applyDuration(Math.min(180, Math.max(0.25, v)) * 60); // ≥15s
 });
 
 startBtn.addEventListener('click', () => {
   if (state === 'ready') beginRun();
   else if (state === 'running') { state = 'paused'; updateButtons(); setStatus('paused'); }
   else if (state === 'paused') {
-    const newStamp = performance.now() - elapsedMs;
-    // shift jam-timeout clocks by the paused wall time so resume doesn't mass-teleport
-    const pausedMs = newStamp - startStamp;
-    for (const i of inFlightSet) releasedAt[i] += pausedMs;
-    startStamp = newStamp;
+    startStamp = performance.now() - elapsedMs;
     state = 'running'; updateButtons(); setStatus('flowing');
   }
 });
@@ -988,26 +928,21 @@ document.addEventListener('visibilitychange', () => {
 /* ============================================================ *
  *  Render / physics loop
  * ============================================================ */
-const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _s = new THREE.Vector3(1, 1, 1);
-function syncInstances(force = false) {
-  let dirty = false;
-  for (let i = 0; i < N; i++) {
-    if (!force && bodies[i].isSleeping()) continue;
-    const t = bodies[i].translation(), r = bodies[i].rotation();
-    posCache[i * 3] = t.x; posCache[i * 3 + 1] = t.y; posCache[i * 3 + 2] = t.z;
-    _v.set(t.x, t.y, t.z);
-    _q.set(r.x, r.y, r.z, r.w);
-    _m.compose(_v, _q, _s);
-    grainMesh.setMatrixAt(i, _m);
-    dirty = true;
-  }
-  if (dirty) grainMesh.instanceMatrix.needsUpdate = true;
-}
-
 let acc = 0, lastT = 0, fps = 60, statsTimer = 0, frame = 0;
-let lowFpsMs = 0, degraded = false;
+let lowFpsMs = 0, degraded = false, lastRaf = 0;
+// throttled/background tabs can suspend rAF entirely — keep the boot settle
+// moving and the clock honest on a timer; the sand reconciles on refocus
+setInterval(() => {
+  if (performance.now() - lastRaf < 400) return;
+  if (state === 'settling' && settle) settleTick(0.3);
+  else if (state === 'running' && !flipPhase) {
+    elapsedMs = performance.now() - startStamp;
+    if (elapsedMs / 1000 >= effDuration) finishRun();
+  }
+}, 300);
 function loop(now) {
   requestAnimationFrame(loop);
+  lastRaf = now;
   const gap = lastT ? (now - lastT) / 1000 : 0.016;
   const dtReal = Math.min(0.05, gap);
   lastT = now;
@@ -1018,37 +953,39 @@ function loop(now) {
     settleTick(gap);
   } else if (state !== 'paused' && state !== 'boot') {
     if (flipPhase) flipTick(now);
-    // throttled tabs: simulate up to 1s of the real gap so motion stays coherent
-    acc += Math.min(1.0, gap);
+    acc += dtReal;
     let steps = 0;
-    const allow = Math.max(MAX_STEPS, Math.min(120, Math.round(gap / DT)));
-    while (acc >= DT && steps < allow) { world.step(); acc -= DT; steps++; }
-    if (acc > DT) acc = 0;
-    clampVelocities();
-    if (state === 'running' && !flipPhase) meterTick(now);
-    if (!flipPhase) trackGrains(now);
-    if (frame % 12 === 0) rescueSweep();
-    if (frame % 150 === 0 && (state === 'running' || state === 'done')) supportSweep();
+    while (acc >= DT && steps < MAX_STEPS) { world.step(); acc -= DT; steps++; }
+    if (acc > DT) acc = 0; // shed backlog — the release budget absorbs it
+    postStep();
+    if (!flipPhase) {
+      freezePass();
+      if (state === 'running') {
+        meter(now);
+        if (elapsedMs / 1000 >= effDuration) finishRun();
+      } else if (state === 'done' && releasedCount < topStart) {
+        meter(now, true); // drain stragglers, banded and capped
+      }
+    }
   }
 
-  if (world) syncInstances();
   updateNoise();
 
-  if (state === 'running') clockEl.textContent = fmt(effDuration - elapsedMs / 1000);
+  if (state === 'running' || state === 'paused') clockEl.textContent = fmt(effDuration - elapsedMs / 1000);
   else if (state === 'done') clockEl.textContent = fmt(0);
-  else if (state === 'paused') clockEl.textContent = fmt(effDuration - elapsedMs / 1000);
   else clockEl.textContent = fmt(effDuration);
 
   statsTimer += dtReal;
   if (statsTimer > 0.25) {
     statsTimer = 0;
+    let awake = 0;
+    for (let i = 0; i < N; i++) if (!frozen[i] && !bodies[i].isSleeping()) awake++;
     const rate = topStart && effDuration ? (topStart / Math.max(1, effDuration - TRANSIT_S)).toFixed(1) : '0';
     statsEl.textContent =
-      `${passed.toLocaleString()} / ${topStart.toLocaleString()} grains through · ${rate}/s · ${Math.round(fps)} fps` +
+      `${releasedCount.toLocaleString()} / ${topStart.toLocaleString()} grains through · ${rate}/s · ${Math.round(fps)} fps · ${awake} awake` +
       (escaped ? ` · rescued ${escaped}` : '');
   }
 
-  // sustained slow frames while running → cheaper glass + native resolution
   if (state === 'running' && fps < 42) lowFpsMs += dtReal * 1000; else lowFpsMs = 0;
   if (lowFpsMs > 4000 && !degraded) {
     degraded = true;
@@ -1073,20 +1010,21 @@ function loop(now) {
     world.timestep = DT;
     buildStaticColliders();
     overlayText.textContent = 'Pouring the sand…';
-    buildSand(grainBudget(baseDuration));
-    syncInstances(true);
+    buildSand();
+    postStep(true);
     beginSettle('ready');
     requestAnimationFrame(loop);
 
-    // debug/verification handle (harmless in production)
+    // debug/verification handle
     window.__hg = {
-      get state() { return state; }, get passed() { return passed; },
-      get inFlight() { return inFlight; }, get topStart() { return topStart; },
-      get N() { return N; }, get escaped() { return escaped; },
-      get fps() { return fps; }, get elapsed() { return elapsedMs / 1000; },
-      get effDuration() { return effDuration; }, get orientation() { return orientation; },
-      get awake() { let n = 0; for (let i = 0; i < N; i++) if (!bodies[i].isSleeping()) n++; return n; },
-      grainY(i) { return posCache[i * 3 + 1]; },
+      get state() { return state; }, get released() { return releasedCount; },
+      get topStart() { return topStart; }, get N() { return N; },
+      get escaped() { return escaped; }, get fps() { return fps; },
+      get elapsed() { return elapsedMs / 1000; }, get effDuration() { return effDuration; },
+      get orientation() { return orientation; }, get grainR() { return GRAIN_R; },
+      get frozenCount() { let n = 0; for (let i = 0; i < N; i++) if (frozen[i]) n++; return n; },
+      get awake() { let n = 0; for (let i = 0; i < N; i++) if (!frozen[i] && !bodies[i].isSleeping()) n++; return n; },
+      get relRate() { return relRate; },
       snap(q = 0.8) { renderer.render(scene, camera); return renderer.domElement.toDataURL('image/jpeg', q); },
     };
   } catch (err) {
