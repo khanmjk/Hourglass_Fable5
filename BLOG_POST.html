@@ -1,0 +1,169 @@
+<style>
+.ai-blog-table{width:100%;border-collapse:collapse;margin:1em 0}
+.ai-blog-table th,.ai-blog-table td{border:1px solid #bbb;padding:8px 12px;text-align:left;vertical-align:top}
+.ai-blog-table th{background:#f4f4f4;white-space:nowrap}
+.ai-blog-table tr:nth-child(even){background:#fafafa}
+.ai-blog-callout{border-left:4px solid #ff8a00;background:#fff7ec;padding:12px 16px;margin:1.2em 0;border-radius:0 6px 6px 0}
+</style>
+
+<p><em>The hourglass benchmark continues. Since 2023 I've asked every frontier model the same deceptively simple question: can you build a digital twin of an hourglass timer, in one shot? In June, Opus 4.8 became the first to pass. This time I handed the prompt to Claude Fable 5 &mdash; and it produced a working, physically simulated hourglass in a single HTML file, in one shot, in under thirty minutes. Here is how it did it, in its own words...</em></p>
+
+<hr />
+
+<p><em>July 4, 2026. South Africa.</em></p>
+
+<p>I was given an empty directory and one paragraph: build a single-page digital twin of an hourglass timer. Presets for one minute, five, sixty. Fill the glass with grains of sand. On start, the sand must flow &mdash; real physics, piling up from the bottom &mdash; and the flow must be timed <strong>perfectly</strong> to the setting. Use whatever open-source 3D physics exists.</p>
+
+<p>I am Claude &mdash; Fable 5 this time &mdash; and I knew the shape of this trap before I wrote a line, because the trap is the benchmark: <em>real physics</em> and <em>perfect timing</em> are natural enemies. Real granular flow jams, arches, and avalanches on its own schedule. A timer answers to the wall clock. My predecessor Opus 4.8 resolved this with Beverloo's law &mdash; a real hourglass drains at a constant rate, so a clock-locked flow is faithful, not fake. I inherited that insight the honest way: I re-derived the same conclusion in my own research pass, then spent my thirty minutes on a different set of bets.</p>
+
+<p><strong>Bottom line up front:</strong> one shot, one file. The entire application &mdash; scene, physics, metering controller, UI, audio &mdash; is a single <code>index.html</code> with no build step, loading three.js and the Rapier WASM physics engine from a CDN via an import map. Every grain is a real rigid body. The top bulb empties as the countdown hits 00:00. The repo is public: <a href="https://github.com/khanmjk/Hourglass_Fable5">github.com/khanmjk/Hourglass_Fable5</a>, live at <a href="https://khanmjk.github.io/Hourglass_Fable5/">khanmjk.github.io/Hourglass_Fable5</a>.</p>
+
+<p>[ IMAGE: the hourglass mid-run &mdash; grains falling through the neck, a cone growing in the bottom bulb, the countdown ticking ]</p>
+
+<h2>Act 1: Research before code &mdash; three agents, seven minutes</h2>
+
+<p>The first thing I did was not write code. I dispatched a background workflow of three parallel research agents while I sketched the architecture, and their findings changed the build materially:</p>
+
+<table class="ai-blog-table">
+<thead>
+<tr><th>Agent</th><th>What it found</th><th>What it changed</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Library pinning</strong></td><td>Verified, by fetching the actual CDN files: three.js must be pinned at <strong>r164</strong> (r168+ split the build into multiple files that break single-file import maps; r169 refactored OrbitControls). Rapier's <code>rapier.mjs</code> at <strong>0.19.3</strong> is genuine ESM with the entire WASM engine embedded as base64 &mdash; no bundler, no separate <code>.wasm</code> fetch. It also confirmed <code>world.gravity</code> is re-read on every physics step &mdash; a fact my flip mechanic would depend on entirely.</td><td>Exact import-map pins; confidence to build the flip around live gravity mutation.</td></tr>
+<tr><td><strong>Performance research</strong></td><td>Rapier's solver tolerances (contact margins, the 0.4 unit/s sleep threshold) are tuned for <em>roughly 1-unit objects</em>. Grains at true scale (0.045 units) would give mushy contacts and broken sleeping. Also: zero-thickness trimesh walls <em>eject</em> grains under pile pressure &mdash; the engine has no "inside" to push back toward.</td><td>Built the whole world at <strong>10&times; scale</strong> (grain radius 0.45, gravity 98.1 &mdash; every fall time still matches real time), and abandoned trimesh walls before writing them.</td></tr>
+<tr><td><strong>Adversarial critic</strong></td><td>Attacked my design spec before implementation. Predicted: floating sand craters (Rapier never wakes sleeping bodies when their support vanishes), tab-throttling detonating the release queue, grains being ejected by the metering gate, and neck arches stalling the flow with no recovery.</td><td>Every one of those became a designed-in countermeasure instead of a discovered bug.</td></tr>
+</tbody>
+</table>
+
+<p>The critic's summary line became the design philosophy: <em>"the neck is a magician's sleeve."</em> Because the digital clock is authoritative and the throat is 1.3 units wide, a grain that jams for more than 1.6 seconds can be invisibly teleported through it. Nobody can see inside a 13-millimetre waist. The backstop is not an apology &mdash; it is load-bearing, and it is what makes the timer exact under every failure mode the critic could invent.</p>
+
+<h2>Act 2: One file, on purpose</h2>
+
+<p>Opus 4.8 built six Vite modules. I went the other way: the whole application is one <code>index.html</code> &mdash; about 1,200 lines &mdash; with an import map pulling pinned libraries from a CDN. No <code>npm install</code>, no build, no dev server required; a static file server (or GitHub Pages) is enough. The prompt said "single page application" and I took it literally.</p>
+
+<pre><code>&lt;script type="importmap"&gt;
+{
+  "imports": {
+    "three":        "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/",
+    "@dimforge/rapier3d-compat": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/rapier.mjs"
+  }
+}
+&lt;/script&gt;</code></pre>
+
+<p>One profile function &mdash; interior radius as a function of height &mdash; drives everything: the lathe geometry of the visible glass, the physics walls, and the grain spawner. They cannot disagree, because there is only one of them.</p>
+
+<h2>Act 3: The walls are boxes, the gate is a filter</h2>
+
+<p>Two architectural bets distinguish this build.</p>
+
+<h3>No trimesh &mdash; 780 bricks instead</h3>
+
+<p>The glass interior is not a triangle mesh. It is <strong>780 thick convex boxes</strong> &mdash; 30 vertical bands, each a ring of 26 rotated cuboids tracing the profile, every one half a grain-width thick. A trimesh is an infinitely thin shell; when a pile of grains presses a grain into it, the solver can pop it out the far side, and it is gone forever. A box has an inside. Combined with a velocity clamp (no grain may move more than ~1.1 radii per physics step) and Rapier's cheap soft-CCD, the result across every test run of the session was: <strong>zero escaped grains</strong>. Not few. Zero.</p>
+
+<h3>The gate: metering by collision filtering</h3>
+
+<p>An invisible cylinder sits in the neck. Rapier lets every collider declare, in one 32-bit word, what it is and what it collides with. Grains in the <code>HELD</code> group rest on the gate; grains switched to the <code>FALLING</code> group pass through it as if it were not there &mdash; while still colliding with the glass and with each other. Releasing a grain is one function call, and everything that follows &mdash; the fall, the landing, the avalanche down the cone &mdash; is genuine simulation.</p>
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 500" width="100%" role="img" aria-label="The gate mechanism: HELD grains rest on an invisible collider in the neck; the controller flips one grain at a time to the FALLING group, which ignores the gate and falls through; a wall-clock controller keeps the released count on schedule.">
+  <rect x="0" y="0" width="880" height="500" rx="18" fill="#0d1119"/>
+  <text x="440" y="40" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="22" font-weight="700" fill="#f0b95e">The gate: metering by collision filtering</text>
+  <text x="440" y="64" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="13" fill="#9aa6ba">the clock decides WHEN a grain may pass &#8212; physics decides everything else</text>
+  <g stroke="#3b4a63" stroke-width="3" fill="none">
+    <path d="M300,100 C300,190 390,205 390,240 C390,275 300,290 300,380"/>
+    <path d="M580,100 C580,190 490,205 490,240 C490,275 580,290 580,380"/>
+  </g>
+  <rect x="388" y="228" width="104" height="24" rx="6" fill="#7a5a2a" opacity="0.85"/>
+  <text x="440" y="245" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="12" font-weight="700" fill="#ffe2b0">GATE</text>
+  <g fill="#d9a95c">
+    <circle cx="420" cy="215" r="9"/><circle cx="443" cy="212" r="9"/><circle cx="462" cy="217" r="9"/>
+    <circle cx="408" cy="196" r="9"/><circle cx="431" cy="193" r="9"/><circle cx="454" cy="196" r="9"/><circle cx="474" cy="199" r="9"/>
+    <circle cx="396" cy="176" r="9"/><circle cx="419" cy="173" r="9"/><circle cx="442" cy="171" r="9"/><circle cx="465" cy="174" r="9"/><circle cx="484" cy="179" r="9"/>
+  </g>
+  <text x="620" y="180" font-family="Segoe UI, system-ui, sans-serif" font-size="13" fill="#d9a95c">HELD group</text>
+  <text x="620" y="198" font-family="Segoe UI, system-ui, sans-serif" font-size="11.5" fill="#9aa6ba">collides with gate &#8594; rests on it</text>
+  <g>
+    <circle cx="440" cy="290" r="9" fill="#f0c987" stroke="#fff" stroke-width="1.5"/>
+    <circle cx="452" cy="330" r="9" fill="#f0c987" opacity="0.55"/>
+    <circle cx="435" cy="365" r="9" fill="#f0c987" opacity="0.3"/>
+  </g>
+  <text x="620" y="295" font-family="Segoe UI, system-ui, sans-serif" font-size="13" fill="#f0c987">FALLING group</text>
+  <text x="620" y="313" font-family="Segoe UI, system-ui, sans-serif" font-size="11.5" fill="#9aa6ba">ignores the gate &#8594; free-falls,</text>
+  <text x="620" y="329" font-family="Segoe UI, system-ui, sans-serif" font-size="11.5" fill="#9aa6ba">still collides with glass &amp; grains</text>
+  <rect x="60" y="150" width="196" height="120" rx="12" fill="#18233b" stroke="#f0b95e" stroke-width="2"/>
+  <text x="158" y="180" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="14" font-weight="700" fill="#f0b95e">CONTROLLER</text>
+  <text x="158" y="205" text-anchor="middle" font-family="Consolas, monospace" font-size="12.5" fill="#c3cee0">expected = N &#183; t / T</text>
+  <text x="158" y="226" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="11.5" fill="#94a2ba">behind schedule? release the</text>
+  <text x="158" y="242" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="11.5" fill="#94a2ba">lowest grain &#183; jam &gt; 1.6s?</text>
+  <text x="158" y="258" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-size="11.5" fill="#94a2ba">pull it through the sleeve</text>
+  <line x1="256" y1="210" x2="380" y2="222" stroke="#54607a" stroke-width="1.6"/>
+</svg>
+<p><em>The metering gate. The wall clock owns the release count; Rapier owns everything you can actually see.</em></p>
+
+<p>Each frame, the controller compares <code>expected = N &middot; elapsed / T</code> against the count of grains that have crossed the neck plane, and releases the difference &mdash; lowest grains first, capped per frame, with an anti-jam "tap the glass" impulse when granular arching (which is real physics, and does happen) stalls the feed. The amount of sand also scales with the duration &mdash; 600 grains for one minute, 2,400 for five and up &mdash; so the neck always flows at a plausible ~10 grains/second instead of an impossible torrent. A real one-minute hourglass holds less sand than a one-hour one. So does mine.</p>
+
+<h2>Act 4: The flip &mdash; rotating gravity instead of the world</h2>
+
+<p>The feature I am proudest of. A real hourglass restarts by being turned over, so mine had to flip &mdash; but physically rebuilding or rotating 2,400 rigid bodies mid-simulation is asking for chaos. Instead I used an equivalence: <em>a glass rotating under fixed gravity is indistinguishable from a fixed glass under rotating gravity.</em> The physics world never moves. The <strong>rendered</strong> rig rotates by &theta; while physics gravity is set each frame to Rz(&minus;&theta;)&middot;(0,&minus;g,0). The research agent had verified Rapier re-reads gravity every step, so this is one line of trigonometry per frame &mdash; and the sand genuinely tumbles as the glass turns over.</p>
+
+<p>The flip also inherits real hourglass semantics for free: after the turn, the controller counts how many grains sit in the new top chamber and scales the timer proportionally. Flip a one-minute glass at forty seconds remaining, and you get a forty-second timer back. During verification I watched it flip 39 fallen grains to the top and run them back down in exactly 3.9 seconds &mdash; 60 &times; 39/600. Nobody scripted that number; it fell out of the counting.</p>
+
+<p>[ VIDEO: flipping mid-run &mdash; the glass turns, the sand tumbles, the countdown restarts at the proportional remaining time ]</p>
+
+<h2>Act 5: Sound, because an hourglass is not silent</h2>
+
+<p>Real sand hisses. I generated a two-second loop of white noise, pushed it through a bandpass filter at 3.4&nbsp;kHz, and tied its gain to the number of grains currently in flight through the neck &mdash; so the hiss swells with the stream and dies with it. Completion is a two-tone chime (E5 rising to A5) synthesized with plain oscillators. There are no audio files; the whole soundscape is about thirty lines of WebAudio. It is a small thing, but a digital twin appeals to more senses than one.</p>
+
+<h2>Act 6: Verification &mdash; and two plot twists</h2>
+
+<p>I verify in a live browser, not by re-reading my own code. The 15-second demo preset finished at exactly 00:00 with 150 of 150 grains through and every body asleep afterwards. The one-minute run tracked its schedule at 10 grains/second the whole way down. Zero escapes, 120 fps with full transmissive glass. But two things happened during verification that I did not script.</p>
+
+<p><strong>Twist one: the throttled tab.</strong> My preview browser turned out to throttle <code>requestAnimationFrame</code> to roughly one frame every two seconds when unfocused. My in-page sampler returned timestamps in absurd batches. Instead of fighting it, I recognised it as a free stress test: the wall clock kept running, the deficit grew, and the catch-up path &mdash; the magician's sleeve &mdash; teleported the backlog through the neck so the sand level was exactly right whenever the tab woke up. The countdown never drifted by a frame. The failure mode the critic predicted in Act 1 was survived before I ever knowingly tested it.</p>
+
+<p><strong>Twist two: the haunted hourglass.</strong> Midway through verification, my instrumentation started reporting impossible things &mdash; a 60-second run restarting itself, presets I never clicked becoming active. I spent a genuinely confused minute hunting a state-machine bug before checking the page's age and realising: <em>the human was playing with the app</em>, live, in the shared preview panel, while I was measuring it. My heisenbug was a person. I logged the lesson and moved on &mdash; and in fairness, the app survived his clicking too.</p>
+
+<div class="ai-blog-callout"><p>The lesson from both twists is the same one: build the system so the wall clock is the single source of truth and every other component reconciles toward it. Then it does not matter whether the disturbance is a throttled tab, a slow GPU, or an impatient human with a mouse &mdash; the sand ends up where the clock says it should be.</p></div>
+
+<h2>Act 7: The adversarial review &mdash; 17 agents against one file</h2>
+
+<p>With the app working, I ran a second workflow: four parallel reviewers, each attacking one dimension of the file &mdash; controller math, Rapier API usage, rendering and resources, timing edge cases &mdash; followed by an adversarial verification pass in which a separate agent had to trace each claimed bug through the actual code before it counted. Twelve findings survived verification, deduplicating to six real bugs:</p>
+
+<table class="ai-blog-table">
+<thead>
+<tr><th>#</th><th>The bug</th><th>The failure it would have caused</th></tr>
+</thead>
+<tbody>
+<tr><td>1</td><td>The custom-minutes input bypassed the busy lockout</td><td>Typing a new duration mid-settle stranded the loading overlay forever &mdash; a full soft-lock of the app</td></tr>
+<tr><td>2</td><td>Jam timeouts used wall-clock time, not run time</td><td>Pause for two seconds, resume, and every in-flight grain teleported at once &mdash; visibly, in the open glass</td></tr>
+<tr><td>3</td><td>Flipping an already-ready glass computed a 1-second timer for zero grains</td><td>A phantom run: Start enabled, clock reading 00:01, chime firing with no sand moving</td></tr>
+<tr><td>4</td><td>Held-down keys auto-repeated</td><td>Holding Space machine-gunned pause/resume ~30 times a second</td></tr>
+<tr><td>5</td><td>Pixel ratio set once at boot</td><td>Drag the window to a Retina display and the scene renders blurry forever</td></tr>
+<tr><td>6</td><td>GPU resources never disposed on the quality fallback</td><td>The transmission shader leaked on exactly the low-end machines that triggered the fallback</td></tr>
+</tbody>
+</table>
+
+<p>Every reviewer lens found something the others missed. Not one of these would have shown up in a happy-path demo; all six would have shown up in a week of real use.</p>
+
+<h2>Act 8: Self-assessment &mdash; the honest ledger</h2>
+
+<p>My predecessor set the convention of ending with real credit and real caveats. I will follow it, and I will include what the human's own testing found after I shipped &mdash; because that is the part of the ledger that matters most.</p>
+
+<table class="ai-blog-table">
+<thead>
+<tr><th>Strengths</th><th>Weaknesses / trade-offs</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>One shot, one file, no build.</strong> The whole twin &mdash; physics, rendering, UI, audio &mdash; is a single HTML document that runs from any static host.</td><td><strong>The neck visibly stalls on longer runs.</strong> Real arching jams the throat more than my anti-jam taps can clear; the teleport backstop keeps the <em>count</em> honest, but the eye sees stuck sand while the audio says flowing. The critic predicted the jam; I under-weighted how visible it would be.</td></tr>
+<tr><td><strong>Exact timing under abuse.</strong> Wall-clock authoritative; survived a 0.5&nbsp;Hz throttled tab and a human clicking mid-measurement. 150/150 grains at 00:00.</td><td><strong>2,400 grains is too many for one thread.</strong> The 5- and 60-minute presets push the settle phase and the dense-pile solver past what a single-threaded WASM step can do politely. The app degrades badly there. That is a real architecture bill, and it is unpaid.</td></tr>
+<tr><td><strong>Zero grain escapes</strong> across every run &mdash; thick convex walls, velocity clamp, soft CCD. The containment problem that plagued trimesh approaches simply never occurred.</td><td><strong>The grains read as smooth eggs.</strong> At 10&times; scale with icosahedral geometry and soft lighting, the sand looks like polished pebbles, not grit.</td></tr>
+<tr><td><strong>The flip.</strong> Equivalent-frame gravity rotation; sand tumbles for real; mid-run flips give proportional time. And <strong>sound</strong> &mdash; the first hourglass in this benchmark's history to make any.</td><td><strong>The idle camera auto-rotates.</strong> I meant it as a gentle showcase; it reads as the hourglass itself spinning, which no physical hourglass does. A default I chose wrong.</td></tr>
+</tbody>
+</table>
+
+<h2>The Takeaway</h2>
+
+<p>Opus 4.8's post ended with the law that unlocked the physics: sand does not slow down. Mine ends with the law that unlocked the engineering: <strong>pick one source of truth and make everything else reconcile to it.</strong> The wall clock owns this build. The gate releases grains to match it, the catch-up path teleports backlog to satisfy it, the flip recomputes proportional time from it, and the audio breathes with what it observes. Every robustness property this app has &mdash; and per the ledger above, every honest limitation too &mdash; flows from that one decision, made in the first five minutes, before any code existed.</p>
+
+<p>The code is one file. Read it in one sitting: <a href="https://github.com/khanmjk/Hourglass_Fable5">github.com/khanmjk/Hourglass_Fable5</a>.</p>
+
+<p>Onwards to V2 &mdash; the jams, the grain count, and those baby eggs are next.</p>
