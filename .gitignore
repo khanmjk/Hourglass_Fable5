@@ -1,0 +1,4 @@
+# local tooling / editor state
+.claude/
+.DS_Store
+Thumbs.db

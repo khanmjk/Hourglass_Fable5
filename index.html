@@ -1,0 +1,1102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hourglass — Digital Twin Timer</title>
+<style>
+  :root {
+    --sand: #d9a95c;
+    --sand-bright: #f0c987;
+    --ink: #e8e4dc;
+    --ink-dim: #9a958b;
+    --panel: rgba(20, 22, 30, 0.55);
+    --stroke: rgba(255, 255, 255, 0.10);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+    background: radial-gradient(120% 90% at 50% 30%, #1a1d27 0%, #0c0e15 55%, #050609 100%);
+    color: var(--ink);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #scene { position: fixed; inset: 0; display: block; touch-action: none; }
+
+  header {
+    position: fixed; top: 22px; left: 28px; z-index: 5; pointer-events: none;
+  }
+  header h1 {
+    font-size: 15px; font-weight: 600; letter-spacing: 0.32em; color: var(--ink);
+  }
+  header h1 span {
+    display: block; font-size: 10px; font-weight: 400; letter-spacing: 0.24em;
+    color: var(--ink-dim); margin-top: 4px;
+  }
+
+  #readout {
+    position: fixed; top: 26px; left: 50%; transform: translateX(-50%);
+    text-align: center; z-index: 5; pointer-events: none;
+  }
+  #clock {
+    font-size: clamp(44px, 7vw, 64px); font-weight: 200;
+    font-variant-numeric: tabular-nums; letter-spacing: 0.04em;
+    color: var(--ink); text-shadow: 0 2px 24px rgba(0,0,0,0.6);
+    transition: color 0.4s;
+  }
+  #clock.done { color: var(--sand-bright); }
+  #status {
+    font-size: 11px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: var(--ink-dim); margin-top: 2px;
+  }
+
+  #muteBtn {
+    position: fixed; top: 24px; right: 28px; z-index: 6;
+    width: 40px; height: 40px; border-radius: 50%;
+    background: var(--panel); border: 1px solid var(--stroke);
+    color: var(--ink-dim); font-size: 16px; cursor: pointer;
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  }
+  #muteBtn:hover { color: var(--ink); }
+
+  #panel {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+    z-index: 5; display: flex; flex-direction: column; gap: 12px; align-items: center;
+    padding: 16px 22px; border-radius: 20px;
+    background: var(--panel); border: 1px solid var(--stroke);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+    max-width: min(94vw, 620px);
+  }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; }
+
+  .chip {
+    padding: 7px 15px; border-radius: 999px; font-size: 13px; font-weight: 500;
+    background: rgba(255,255,255,0.05); border: 1px solid var(--stroke);
+    color: var(--ink-dim); cursor: pointer; transition: all 0.15s;
+  }
+  .chip:hover { color: var(--ink); border-color: rgba(255,255,255,0.25); }
+  .chip.active {
+    background: rgba(217, 169, 92, 0.16); border-color: var(--sand);
+    color: var(--sand-bright);
+  }
+  #customMin {
+    width: 64px; padding: 7px 10px; border-radius: 999px; font-size: 13px;
+    background: rgba(255,255,255,0.05); border: 1px solid var(--stroke);
+    color: var(--ink); outline: none; text-align: center;
+  }
+  #customMin::placeholder { color: var(--ink-dim); }
+  #customMin:focus { border-color: var(--sand); }
+
+  .btn {
+    padding: 10px 22px; border-radius: 12px; font-size: 14px; font-weight: 600;
+    letter-spacing: 0.04em; cursor: pointer; transition: all 0.15s;
+    background: rgba(255,255,255,0.07); border: 1px solid var(--stroke); color: var(--ink);
+  }
+  .btn:hover:not(:disabled) { background: rgba(255,255,255,0.13); }
+  .btn:disabled { opacity: 0.35; cursor: default; }
+  .btn.primary {
+    background: linear-gradient(160deg, #e3b269, #b97f35); color: #221503;
+    border-color: transparent;
+  }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
+
+  #stats {
+    font-size: 11px; letter-spacing: 0.08em; color: var(--ink-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  #hint {
+    position: fixed; bottom: 6px; left: 50%; transform: translateX(-50%);
+    font-size: 10px; letter-spacing: 0.14em; color: rgba(255,255,255,0.22); z-index: 4;
+  }
+
+  #overlay {
+    position: fixed; inset: 0; z-index: 20; display: flex;
+    align-items: center; justify-content: center;
+    background: rgba(5, 6, 9, 0.78); backdrop-filter: blur(6px);
+    transition: opacity 0.5s;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  #overlay .card { text-align: center; width: 280px; }
+  #overlay .glass-icon { font-size: 44px; animation: turn 2.4s ease-in-out infinite; display: inline-block; }
+  @keyframes turn { 0%, 60% { transform: rotate(0); } 90%, 100% { transform: rotate(180deg); } }
+  #overlayText { margin: 16px 0 14px; font-size: 13px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-dim); }
+  .bar { height: 3px; border-radius: 2px; background: rgba(255,255,255,0.08); overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0%; border-radius: 2px; background: linear-gradient(90deg, #b97f35, #f0c987); transition: width 0.2s; }
+  #err { color: #e08a7a; font-size: 13px; line-height: 1.6; letter-spacing: 0; text-transform: none; display: none; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/",
+    "@dimforge/rapier3d-compat": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.19.3/rapier.mjs"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<header><h1>HOURGLASS<span>A DIGITAL TWIN</span></h1></header>
+
+<div id="readout">
+  <div id="clock">01:00</div>
+  <div id="status">preparing</div>
+</div>
+
+<button id="muteBtn" title="toggle sound">🔊</button>
+
+<div id="panel">
+  <div class="row" id="presets">
+    <button class="chip" data-secs="15">15 sec</button>
+    <button class="chip active" data-secs="60">1 min</button>
+    <button class="chip" data-secs="300">5 min</button>
+    <button class="chip" data-secs="3600">60 min</button>
+    <input id="customMin" type="number" min="0.1" max="180" step="any" placeholder="min" title="custom minutes" />
+  </div>
+  <div class="row">
+    <button class="btn primary" id="startBtn">Start</button>
+    <button class="btn" id="flipBtn">⟲ Flip</button>
+    <button class="btn" id="resetBtn">Reset</button>
+  </div>
+  <div id="stats">—</div>
+</div>
+<div id="hint">drag to orbit · scroll to zoom · space start/pause · F flip · R reset</div>
+
+<div id="overlay">
+  <div class="card">
+    <span class="glass-icon">⌛</span>
+    <p id="overlayText">Blowing the glass…</p>
+    <div class="bar"><i id="overlayBar"></i></div>
+    <p id="err"></p>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import * as RAPIER_NS from '@dimforge/rapier3d-compat';
+const RAPIER = RAPIER_NS.default ?? RAPIER_NS;
+
+/* ============================================================ *
+ *  Constants.
+ *  The world is built at 10x real scale (1 unit = 10 cm) so
+ *  grain radii sit near Rapier's ~1-unit solver tolerances —
+ *  tiny grains at true scale give mushy contacts and broken
+ *  sleeping. Gravity is scaled by the same factor, which keeps
+ *  every fall time identical to real time.
+ * ============================================================ */
+const G        = 98.1;    // 9.81 m/s² at 10x length scale
+const H        = 15.5;    // interior half-height of the glass
+const BULB_R   = 10.5;    // widest interior radius
+const NECK_R   = 1.3;     // interior radius at the waist
+const CAP_R    = 5.2;     // interior radius where glass meets the wooden caps
+const WAIST_Y  = 0.62 * H;
+const GRAIN_R  = 0.45;
+
+const DT              = 1 / 120;
+const MAX_STEPS       = 5;       // physics catch-up cap per frame
+const V_MAX           = 60;      // velocity clamp: V_MAX*DT ≈ 1.1*GRAIN_R (anti-tunnel)
+const GRAINS_MAX      = 2400;
+const GRAINS_MIN      = 150;
+const RATE_TARGET     = 10;      // grains/sec the neck passes comfortably
+const CROSS_Y         = 1.2;     // grain has "passed" once y*orient < -CROSS_Y
+const REGROUP_Y       = 2.4;     // safe to re-enter HELD group (clear of the gate)
+const GATE_HH         = 0.3;     // gate half-height
+const RELEASES_MAX    = 6;       // per frame, normal path
+const INFLIGHT_CAP    = 18;
+const CATCHUP_DEFICIT = 30;      // beyond this, teleport instead of simulate
+const TRANSIT_S       = 0.9;     // mean neck→pile transit; schedule finishes early by this
+
+// Rapier collision groups: high 16 bits = membership, low 16 = filter.
+const G_WALL = 0x1, G_GATE = 0x2, G_HELD = 0x4, G_FALL = 0x8;
+const GRP_WALL = (G_WALL << 16) | (G_HELD | G_FALL);
+const GRP_GATE = (G_GATE << 16) | G_HELD;
+const GRP_HELD = (G_HELD << 16) | (G_WALL | G_GATE | G_HELD | G_FALL);
+const GRP_FALL = (G_FALL << 16) | (G_WALL | G_HELD | G_FALL);
+
+/* Interior radius of the glass at height |y| — one profile drives the
+   visual lathe, the physics walls and the grain spawner. */
+function profileR(u) {
+  const smooth = (t) => t * t * (3 - 2 * t);
+  if (u <= WAIST_Y) return NECK_R + (BULB_R - NECK_R) * smooth(u / WAIST_Y);
+  const t = Math.min(1, (u - WAIST_Y) / (H - WAIST_Y));
+  return BULB_R + (CAP_R - BULB_R) * smooth(t);
+}
+
+/* ============================================================ *
+ *  DOM
+ * ============================================================ */
+const $ = (id) => document.getElementById(id);
+const clockEl = $('clock'), statusEl = $('status'), statsEl = $('stats');
+const overlayEl = $('overlay'), overlayText = $('overlayText'), overlayBar = $('overlayBar'), errEl = $('err');
+const startBtn = $('startBtn'), flipBtn = $('flipBtn'), resetBtn = $('resetBtn'), muteBtn = $('muteBtn');
+
+function fatal(msg) {
+  overlayEl.classList.remove('hidden');
+  overlayText.style.display = 'none';
+  errEl.style.display = 'block';
+  errEl.textContent = msg;
+}
+
+/* ============================================================ *
+ *  Three.js scene
+ * ============================================================ */
+const renderer = new THREE.WebGLRenderer({ canvas: $('scene'), antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.domElement.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault();
+  fatal('The graphics context was lost — please refresh the page.');
+});
+
+const scene = new THREE.Scene();
+// transmission samples the scene's own background — an alpha canvas would
+// render the glass against undefined color, so paint the backdrop in-scene
+scene.background = new THREE.Color(0x0d0f16);
+scene.fog = new THREE.Fog(0x0d0f16, 150, 420);
+const pmrem = new THREE.PMREMGenerator(renderer);
+const envScene = new RoomEnvironment();
+scene.environment = pmrem.fromScene(envScene, 0.04).texture;
+pmrem.dispose();
+envScene.dispose();
+
+const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.5, 500);
+camera.position.set(34, 13, 47);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.5;
+controls.minDistance = 25;
+controls.maxDistance = 130;
+controls.maxPolarAngle = Math.PI / 2 + 0.25;
+
+const keyLight = new THREE.DirectionalLight(0xfff2dd, 2.8);
+keyLight.position.set(40, 70, 50);
+keyLight.castShadow = true;
+keyLight.shadow.mapSize.set(2048, 2048);
+keyLight.shadow.camera.left = -45; keyLight.shadow.camera.right = 45;
+keyLight.shadow.camera.top = 45;   keyLight.shadow.camera.bottom = -45;
+keyLight.shadow.camera.far = 250;
+keyLight.shadow.bias = -0.0008;
+keyLight.shadow.normalBias = 0.4;
+scene.add(keyLight);
+scene.add(new THREE.HemisphereLight(0x8899bb, 0x21160a, 0.5));
+const rim = new THREE.PointLight(0xd9a95c, 2200, 0, 2);
+rim.position.set(-30, 25, -30);
+scene.add(rim);
+
+/* Everything that flips lives in this group (glass, frame, sand). */
+const rig = new THREE.Group();
+scene.add(rig);
+
+/* --- Glass --- */
+const lathePts = [new THREE.Vector2(0.15, -H)];
+for (let i = 0; i <= 72; i++) {
+  const y = -H + (2 * H * i) / 72;
+  lathePts.push(new THREE.Vector2(profileR(Math.abs(y)) + 0.12, y));
+}
+lathePts.push(new THREE.Vector2(0.15, H));
+const glassGeo = new THREE.LatheGeometry(lathePts, 72);
+const glassMat = new THREE.MeshPhysicalMaterial({
+  transmission: 1, thickness: 0.9, roughness: 0.035, ior: 1.45,
+  clearcoat: 0.5, clearcoatRoughness: 0.18,
+  attenuationColor: new THREE.Color(0xeaf4f8), attenuationDistance: 140,
+  specularIntensity: 0.6, envMapIntensity: 0.45,
+});
+const cheapGlassMat = new THREE.MeshPhysicalMaterial({
+  transparent: true, opacity: 0.14, roughness: 0.08, metalness: 0,
+  depthWrite: false, envMapIntensity: 1.3,
+});
+const glass = new THREE.Mesh(glassGeo, glassMat);
+rig.add(glass);
+
+/* --- Wooden frame --- */
+const woodMat = new THREE.MeshStandardMaterial({ color: 0x5c3a22, roughness: 0.62, metalness: 0.05 });
+const woodDark = new THREE.MeshStandardMaterial({ color: 0x472c18, roughness: 0.7, metalness: 0.05 });
+for (const s of [-1, 1]) {
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(BULB_R + 2.2, BULB_R + 2.2, 1.5, 48), woodMat);
+  cap.position.y = s * (H + 0.75);
+  cap.castShadow = cap.receiveShadow = true;
+  rig.add(cap);
+  const lip = new THREE.Mesh(new THREE.TorusGeometry(BULB_R + 2.2, 0.28, 12, 64), woodDark);
+  lip.rotation.x = Math.PI / 2;
+  lip.position.y = s * (H + 1.55);
+  lip.castShadow = true;
+  rig.add(lip);
+}
+for (let i = 0; i < 4; i++) {
+  const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+  const post = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 2 * H + 1.5, 16), woodDark);
+  post.position.set(Math.cos(a) * (BULB_R + 1.3), 0, Math.sin(a) * (BULB_R + 1.3));
+  post.castShadow = true;
+  rig.add(post);
+}
+
+/* --- Table (static, does not flip) --- */
+const table = new THREE.Mesh(
+  new THREE.CylinderGeometry(34, 36, 2.4, 64),
+  new THREE.MeshStandardMaterial({ color: 0x241a12, roughness: 0.85 })
+);
+table.position.y = -(H + 1.83) - 1.2;
+table.receiveShadow = true;
+scene.add(table);
+
+/* --- Sand instances --- */
+const grainGeo = new THREE.IcosahedronGeometry(GRAIN_R, 1);
+const grainMat = new THREE.MeshStandardMaterial({ roughness: 0.92, metalness: 0.0 });
+const grainMesh = new THREE.InstancedMesh(grainGeo, grainMat, GRAINS_MAX);
+grainMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+grainMesh.castShadow = true;
+grainMesh.frustumCulled = false;
+{
+  const c = new THREE.Color();
+  for (let i = 0; i < GRAINS_MAX; i++) {
+    const h = 0.085 + (Math.random() - 0.5) * 0.02;
+    const s = 0.52 + (Math.random() - 0.5) * 0.12;
+    const l = 0.60 + (Math.random() - 0.5) * 0.16;
+    c.setHSL(h, s, Math.random() < 0.06 ? l * 0.55 : l);
+    grainMesh.setColorAt(i, c);
+  }
+  grainMesh.instanceColor.needsUpdate = true;
+}
+rig.add(grainMesh);
+
+/* ============================================================ *
+ *  Physics
+ * ============================================================ */
+let world, bodies = [], colliders = [];
+let N = 0;
+const posCache = new Float32Array(GRAINS_MAX * 3);
+const mode = new Uint8Array(GRAINS_MAX);      // 0 held, 1 in flight, 2 cooling
+const releasedAt = new Float32Array(GRAINS_MAX);
+const settleCache = new Map();                // grain count -> settled transforms
+
+/* Glass walls: rings of thick convex cuboids tracing the lathe profile.
+   Zero-thickness trimeshes eject grains under pile pressure (parry has no
+   "inside" to push back from) — solid boxes cannot. */
+function buildStaticColliders() {
+  const fixed = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+  const BANDS = 30, SEGS = 26, WALL_T = 0.9;
+  const q = new THREE.Quaternion(), basis = new THREE.Matrix4();
+  const xA = new THREE.Vector3(), yA = new THREE.Vector3(), zA = new THREE.Vector3();
+  for (let b = 0; b < BANDS; b++) {
+    const y0 = -H + (2 * H * b) / BANDS, y1 = -H + (2 * H * (b + 1)) / BANDS;
+    const r0 = profileR(Math.abs(y0)), r1 = profileR(Math.abs(y1));
+    const ym = (y0 + y1) / 2, rm = (r0 + r1) / 2;
+    const dr = r1 - r0, dy = y1 - y0;
+    const L = Math.hypot(dr, dy);
+    const nu = dy / L, ny = -dr / L;              // outward normal in the (radial, y) plane
+    const cu = rm + nu * (WALL_T / 2), cy = ym + ny * (WALL_T / 2);
+    const chord = (2 * Math.PI * Math.max(cu, 0.4)) / SEGS;
+    for (let s = 0; s < SEGS; s++) {
+      const a = (s / SEGS) * Math.PI * 2;
+      const ca = Math.cos(a), sa = Math.sin(a);
+      yA.set((dr / L) * ca, dy / L, (dr / L) * sa); // along the profile segment
+      xA.set(-sa, 0, ca);                           // ring tangent
+      zA.crossVectors(xA, yA).normalize();          // wall normal
+      basis.makeBasis(xA, yA, zA);
+      q.setFromRotationMatrix(basis);
+      world.createCollider(
+        RAPIER.ColliderDesc.cuboid(chord * 0.62, L / 2 + 0.12, WALL_T / 2)
+          .setTranslation(cu * ca, cy, cu * sa)
+          .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w })
+          .setFriction(0.22).setRestitution(0)
+          .setCollisionGroups(GRP_WALL),
+        fixed
+      );
+    }
+  }
+  // end lids (grains reach them when the pile is tall or mid-flip)
+  for (const s of [-1, 1]) {
+    world.createCollider(
+      RAPIER.ColliderDesc.cylinder(0.5, CAP_R + 1.2)
+        .setTranslation(0, s * (H + 0.48), 0)
+        .setFriction(0.5).setCollisionGroups(GRP_WALL),
+      fixed
+    );
+  }
+  // The gate: an invisible plug in the neck. HELD grains rest on it,
+  // FALLING grains pass straight through. This is the metering valve.
+  world.createCollider(
+    RAPIER.ColliderDesc.cylinder(GATE_HH, NECK_R + 0.5)
+      .setFriction(0.2).setCollisionGroups(GRP_GATE),
+    fixed
+  );
+}
+
+function spawnPositions(target) {
+  const out = [];
+  const jit = () => (Math.random() - 0.5) * 0.14;
+  const spacing = GRAIN_R * 2.06;
+  for (let y = 3.0; y < H - 1.2 && out.length < target; y += GRAIN_R * 1.72) {
+    const rMax = profileR(Math.abs(y)) - GRAIN_R - 0.25;
+    if (rMax <= 0) continue;
+    out.push([jit(), y, jit()]);
+    const a0 = Math.random() * Math.PI * 2;
+    for (let rr = spacing; rr <= rMax && out.length < target; rr += spacing) {
+      const n = Math.max(3, Math.floor((Math.PI * 2 * rr) / spacing));
+      for (let k = 0; k < n && out.length < target; k++) {
+        const a = a0 + (k / n) * Math.PI * 2;
+        out.push([Math.cos(a) * rr + jit(), y + jit() * 0.4, Math.sin(a) * rr + jit()]);
+      }
+    }
+  }
+  return out;
+}
+
+function buildSand(count) {
+  for (const b of bodies) world.removeRigidBody(b);
+  bodies = []; colliders = [];
+  const pts = spawnPositions(count);
+  N = pts.length;
+  for (let i = 0; i < N; i++) {
+    const [x, y, z] = pts[i];
+    const body = world.createRigidBody(
+      RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, z)
+        .setLinearDamping(0.2).setAngularDamping(1.5)
+        .setSoftCcdPrediction(GRAIN_R * 3)
+    );
+    const col = world.createCollider(
+      RAPIER.ColliderDesc.ball(GRAIN_R)
+        .setFriction(0.55).setRestitution(0)
+        .setCollisionGroups(GRP_HELD),
+      body
+    );
+    bodies.push(body); colliders.push(col);
+    mode[i] = 0;
+    posCache[i * 3] = x; posCache[i * 3 + 1] = y; posCache[i * 3 + 2] = z;
+  }
+  grainMesh.count = N;
+}
+
+/* ============================================================ *
+ *  App state
+ * ============================================================ */
+let state = 'boot';         // boot | settling | ready | running | paused | done
+let baseDuration = 60;      // seconds, from preset
+let effDuration = 60;       // actual run length (shorter after a mid-run flip)
+let startStamp = 0, elapsedMs = 0;
+let passed = 0, inFlight = 0, topStart = 0;
+let orientation = 1;        // +1: top chamber is +Y in physics space
+let thetaBase = 0;          // rig rotation when not mid-flip
+let flipPhase = null;       // null | 'turn' | 'settle'
+let flipT0 = 0, flipSettleT0 = 0;
+const FLIP_MS = 1400, FLIP_SETTLE_MS = 700;
+let escaped = 0;
+const inFlightSet = new Set(), coolingSet = new Set();
+
+const grainBudget = (secs) =>
+  Math.max(GRAINS_MIN, Math.min(GRAINS_MAX, Math.round(secs * RATE_TARGET)));
+
+function setGravity(gx, gy) {
+  world.gravity.x = gx; world.gravity.y = gy; world.gravity.z = 0;
+}
+
+/* ---------- settle: run physics until the pile is quiet ---------- */
+let settle = null;
+function beginSettle(nextState) {
+  state = 'settling';
+  settle = { steps: 0, next: nextState };
+  overlayText.style.display = '';
+  overlayText.textContent = 'Pouring the sand…';
+  errEl.style.display = 'none';
+  overlayEl.classList.remove('hidden');
+  updateButtons();
+}
+function settleTick(gap) {
+  // throttled tabs deliver sparse frames — do proportionally more work per tick
+  const n = Math.max(14, Math.min(240, Math.round(gap / DT) + 4));
+  for (let k = 0; k < n; k++) { world.step(); settle.steps++; }
+  clampVelocities();
+  overlayBar.style.width = Math.min(100, (settle.steps / 820) * 100) + '%';
+  if (settle.steps < 260) return;
+  let maxV = 0;
+  for (let i = 0; i < N; i++) {
+    if (bodies[i].isSleeping()) continue;
+    const v = bodies[i].linvel();
+    maxV = Math.max(maxV, v.x * v.x + v.y * v.y + v.z * v.z);
+  }
+  if (maxV < 0.4 || settle.steps > 1800) {
+    const cache = new Float32Array(N * 7);
+    let leaked = 0;
+    for (let i = 0; i < N; i++) {
+      const t = bodies[i].translation(), r = bodies[i].rotation();
+      cache.set([t.x, t.y, t.z, r.x, r.y, r.z, r.w], i * 7);
+      if (t.y < 0) leaked++;
+    }
+    if (leaked) console.warn(`gate leak during settle: ${leaked} grains below the neck`);
+    settleCache.set(N, cache);
+    const next = settle.next;
+    settle = null;
+    overlayEl.classList.add('hidden');
+    overlayBar.style.width = '0%';
+    enterReady();
+    if (next === 'running') beginRun();
+  }
+}
+
+function restoreFromCache() {
+  const cache = settleCache.get(N);
+  if (!cache) return false;
+  for (let i = 0; i < N; i++) {
+    const o = i * 7;
+    bodies[i].setTranslation({ x: cache[o], y: cache[o + 1], z: cache[o + 2] }, false);
+    bodies[i].setRotation({ x: cache[o + 3], y: cache[o + 4], z: cache[o + 5], w: cache[o + 6] }, false);
+    bodies[i].setLinvel({ x: 0, y: 0, z: 0 }, false);
+    bodies[i].setAngvel({ x: 0, y: 0, z: 0 }, false);
+    colliders[i].setCollisionGroups(GRP_HELD);
+    bodies[i].sleep();
+    mode[i] = 0;
+    posCache[i * 3] = cache[o]; posCache[i * 3 + 1] = cache[o + 1]; posCache[i * 3 + 2] = cache[o + 2];
+  }
+  return true;
+}
+
+function enterReady() {
+  state = 'ready';
+  passed = 0; inFlight = 0; elapsedMs = 0;
+  inFlightSet.clear(); coolingSet.clear();
+  topStart = N;
+  effDuration = baseDuration;
+  clockEl.classList.remove('done');
+  syncInstances(true);
+  updateButtons(); setStatus('ready');
+}
+
+function applyDuration(secs) {
+  baseDuration = secs;
+  const want = grainBudget(secs);
+  thetaBase = 0; orientation = 1; rig.rotation.z = 0; setGravity(0, -G);
+  flipPhase = null;
+  if (Math.abs(want - N) > 40) {
+    buildSand(want);
+    if (restoreFromCache()) enterReady();
+    else beginSettle('ready');
+  } else if (restoreFromCache()) {
+    enterReady();
+  } else {
+    beginSettle('ready');
+  }
+}
+
+function fullReset() {
+  thetaBase = 0; orientation = 1; rig.rotation.z = 0; setGravity(0, -G);
+  flipPhase = null;
+  if (!restoreFromCache()) { beginSettle('ready'); return; }
+  enterReady();
+}
+
+/* ---------- metering controller ---------- */
+function beginRun() {
+  startStamp = performance.now();
+  state = 'running';
+  ensureAudio();
+  updateButtons(); setStatus('flowing');
+}
+
+function findCandidate(wide) {
+  const rimSq = wide ? 4.8 * 4.8 : 3.2 * 3.2;
+  const yMax = wide ? 11 : 6.5;
+  let best = -1, bestY = Infinity;
+  for (let i = 0; i < N; i++) {
+    if (mode[i] !== 0) continue;
+    const x = posCache[i * 3], y = posCache[i * 3 + 1] * orientation, z = posCache[i * 3 + 2];
+    if (y < 0.35 || y > yMax) continue;
+    if (x * x + z * z > rimSq) continue;
+    if (y < bestY) { bestY = y; best = i; }
+  }
+  return best;
+}
+
+function release(i, now) {
+  colliders[i].setCollisionGroups(GRP_FALL);
+  bodies[i].wakeUp();
+  mode[i] = 1;
+  releasedAt[i] = now;
+  inFlightSet.add(i);
+  inFlight++;
+}
+
+/* Teleport a grain to just below the gate — the invisible backstop for
+   jams, tab-throttle catch-up and end-of-run stragglers. The throat is
+   1.3 units wide; nobody can see it happen. */
+function dropThrough(i, now) {
+  bodies[i].setTranslation({
+    x: (Math.random() - 0.5) * 1.6,
+    y: -(REGROUP_Y + 0.4) * orientation,
+    z: (Math.random() - 0.5) * 1.6,
+  }, true);
+  // lateral scatter so consecutive drops don't stack into towers
+  bodies[i].setLinvel({ x: (Math.random() - 0.5) * 5, y: -10 * orientation, z: (Math.random() - 0.5) * 5 }, true);
+  colliders[i].setCollisionGroups(GRP_FALL);
+  bodies[i].wakeUp();
+  mode[i] = 1;
+  releasedAt[i] = now;
+  inFlightSet.add(i);
+  inFlight++;
+}
+
+let lastWake = 0, lastJiggle = 0;
+function wakeFunnel(now) {
+  lastWake = now;
+  for (let i = 0; i < N; i++) {
+    if (mode[i] !== 0) continue;
+    const x = posCache[i * 3], y = posCache[i * 3 + 1] * orientation, z = posCache[i * 3 + 2];
+    if (y > 0 && y < 8.5 && x * x + z * z < 25) bodies[i].wakeUp();
+  }
+}
+function jiggle(now) {
+  if (now - lastJiggle < 350) return;
+  lastJiggle = now;
+  for (let i = 0; i < N; i++) {
+    const x = posCache[i * 3], y = posCache[i * 3 + 1] * orientation, z = posCache[i * 3 + 2];
+    if (y > 0 && y < 4 && x * x + z * z < 9) {
+      const b = bodies[i];
+      b.wakeUp();
+      const m = b.mass();
+      b.applyImpulse({ x: (Math.random() - 0.5) * m * 1.4, y: 0, z: (Math.random() - 0.5) * m * 1.4 }, true);
+    }
+  }
+}
+
+function meterTick(now) {
+  elapsedMs = now - startStamp;
+  const elapsed = elapsedMs / 1000;
+  // schedule finishes TRANSIT_S early so the last grain lands near 0:00
+  const denom = Math.max(1, effDuration - TRANSIT_S);
+  const expected = Math.min(topStart, topStart * (elapsed / denom));
+  let deficit = expected - (passed + inFlight);
+
+  if (deficit > CATCHUP_DEFICIT) {
+    // tab was hidden or the sim stalled: teleport the backlog through
+    let n = 0;
+    while (deficit > 10 && n < 20) {
+      const i = findCandidate(true);
+      if (i < 0) break;
+      dropThrough(i, now);
+      deficit--; n++;
+    }
+  } else {
+    let released = 0, jammed = false;
+    while (deficit >= 1 && released < RELEASES_MAX && inFlight < INFLIGHT_CAP) {
+      let i = findCandidate(false);
+      if (i < 0) i = findCandidate(true);
+      if (i < 0) { jammed = true; break; }
+      release(i, now);
+      deficit--; released++;
+    }
+    if (jammed || deficit >= 4) { wakeFunnel(now); jiggle(now); }
+  }
+
+  if (now - lastWake > 320) wakeFunnel(now);
+  // last stretch: keep every remaining top grain live so none strand on the slope
+  if (effDuration - elapsed < Math.max(2, effDuration * 0.05)) wakeFunnel(now);
+
+  if (elapsed >= effDuration) finishRun();
+}
+
+function finishRun() {
+  state = 'done';
+  clockEl.classList.add('done');
+  chime();
+  updateButtons(); setStatus("time's up — flip to restart");
+}
+
+/* crossing counts, cooling, jam timeouts, straggler drain, containment */
+function trackGrains(now) {
+  for (const i of inFlightSet) {
+    const yo = posCache[i * 3 + 1] * orientation;
+    if (yo < -CROSS_Y) {
+      inFlightSet.delete(i);
+      passed++; inFlight--;
+      mode[i] = 2;
+      coolingSet.add(i);
+    } else if (now - releasedAt[i] > 1600) {
+      // arched/jammed in the throat: the clock is authoritative — pull it through
+      dropThrough(i, now);
+      inFlight--; // dropThrough re-adds
+      releasedAt[i] = now;
+    }
+  }
+  for (const i of coolingSet) {
+    const yo = posCache[i * 3 + 1] * orientation;
+    if (yo < -REGROUP_Y) {
+      const v = bodies[i].linvel();
+      if (v.x * v.x + v.y * v.y + v.z * v.z < 9) {
+        colliders[i].setCollisionGroups(GRP_HELD);
+        mode[i] = 0;
+        coolingSet.delete(i);
+      }
+    }
+  }
+  // once time is up, drain whatever is left on top
+  if (state === 'done') {
+    let n = 0;
+    for (let i = 0; i < N && n < 8; i++) {
+      if (mode[i] === 0 && posCache[i * 3 + 1] * orientation > 0.35) { dropThrough(i, now); n++; }
+    }
+  }
+}
+
+/* radial SDF containment — the glass is a lathe, so "inside" is a 2D test */
+function rescueSweep() {
+  for (let i = 0; i < N; i++) {
+    const x = posCache[i * 3], y = posCache[i * 3 + 1], z = posCache[i * 3 + 2];
+    const rxz = Math.hypot(x, z);
+    const yAbs = Math.min(Math.abs(y), H);
+    if (rxz > profileR(yAbs) + GRAIN_R * 2 || Math.abs(y) > H + 1.5) {
+      escaped++;
+      const yc = THREE.MathUtils.clamp(y, -H + 1, H - 1);
+      const rSafe = Math.max(0.1, profileR(Math.abs(yc)) * 0.5);
+      const s = rxz > 1e-4 ? rSafe / rxz : 0;
+      bodies[i].setTranslation({ x: x * s, y: yc, z: z * s }, true);
+      bodies[i].setLinvel({ x: 0, y: 0, z: 0 }, true);
+    }
+  }
+}
+
+/* Rapier never wakes sleepers when their support vanishes. Find held,
+   sleeping grains with no neighbor on the gravity side and no wall or
+   gate nearby, and wake them so craters can't hang in the air. */
+function supportSweep() {
+  const cells = new Map();
+  const key = (x, y, z) => ((x + 64) << 14) | ((y + 64) << 7) | (z + 64);
+  for (let i = 0; i < N; i++) {
+    const k = key(Math.round(posCache[i * 3]), Math.round(posCache[i * 3 + 1]), Math.round(posCache[i * 3 + 2]));
+    let a = cells.get(k);
+    if (!a) { a = []; cells.set(k, a); }
+    a.push(i);
+  }
+  const reach = GRAIN_R * 2.6;
+  for (let i = 0; i < N; i++) {
+    if (mode[i] !== 0 || !bodies[i].isSleeping()) continue;
+    const x = posCache[i * 3], y = posCache[i * 3 + 1], z = posCache[i * 3 + 2];
+    // craters only form in the draining top chamber; never disturb the bottom pile
+    if (y * orientation < 0.5) continue;
+    // resting on/near the glass wall, the gate, or an end lid?
+    const rxz = Math.hypot(x, z);
+    if (profileR(Math.min(Math.abs(y), H)) - rxz < GRAIN_R * 1.6) continue;
+    if (Math.abs(y) < GATE_HH + GRAIN_R * 1.6 && rxz < NECK_R + 0.6) continue;
+    if (Math.abs(y) > H - GRAIN_R * 1.6) continue;
+    let supported = false;
+    const ix = Math.round(x), iy = Math.round(y), iz = Math.round(z);
+    outer:
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+      const a = cells.get(key(ix + dx, iy + dy, iz + dz));
+      if (!a) continue;
+      for (const j of a) {
+        if (j === i) continue;
+        const drop = (y - posCache[j * 3 + 1]) * orientation; // + means j is on the gravity side
+        if (drop < GRAIN_R * 0.3 || drop > reach) continue;
+        const hx = posCache[j * 3] - x, hz = posCache[j * 3 + 2] - z;
+        if (hx * hx + hz * hz < reach * reach) { supported = true; break outer; }
+      }
+    }
+    if (!supported) bodies[i].wakeUp();
+  }
+}
+
+function clampVelocities() {
+  const maxSq = V_MAX * V_MAX;
+  for (let i = 0; i < N; i++) {
+    if (bodies[i].isSleeping()) continue;
+    const v = bodies[i].linvel();
+    const sq = v.x * v.x + v.y * v.y + v.z * v.z;
+    if (sq > maxSq) {
+      const s = V_MAX / Math.sqrt(sq);
+      bodies[i].setLinvel({ x: v.x * s, y: v.y * s, z: v.z * s }, true);
+    }
+  }
+}
+
+/* ---------- flip ----------
+   Equivalent-frame trick: the physics world never rotates. We rotate the
+   rendered rig by θ and set physics gravity to Rz(−θ)·(0,−g,0), which is
+   exactly what a fixed glass "feels" while the real one turns over. */
+function startFlip() {
+  if (flipPhase || state === 'settling' || state === 'boot') return;
+  flipPhase = 'turn';
+  flipT0 = performance.now();
+  ensureAudio();
+  for (let i = 0; i < N; i++) bodies[i].wakeUp();
+  state = 'ready';
+  setStatus('flipping');
+  updateButtons();
+}
+function flipTick(now) {
+  if (flipPhase === 'turn') {
+    const t = Math.min(1, (now - flipT0) / FLIP_MS);
+    const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const theta = thetaBase + e * Math.PI;
+    rig.rotation.z = theta;
+    setGravity(-G * Math.sin(theta), -G * Math.cos(theta));
+    // sleeping bodies ignore gravity changes entirely — keep everything live
+    if ((now - flipT0) % 200 < 34) for (let i = 0; i < N; i++) bodies[i].wakeUp();
+    if (t >= 1) {
+      thetaBase = (thetaBase + Math.PI) % (2 * Math.PI);
+      rig.rotation.z = thetaBase;
+      orientation = Math.abs(thetaBase) < 0.1 ? 1 : -1;
+      setGravity(0, -G * orientation);
+      inFlightSet.clear(); coolingSet.clear();
+      passed = 0; inFlight = 0;
+      for (let i = 0; i < N; i++) { colliders[i].setCollisionGroups(GRP_HELD); mode[i] = 0; }
+      flipPhase = 'settle';
+      flipSettleT0 = now;
+      setStatus('settling');
+    }
+  } else if (flipPhase === 'settle') {
+    if (now - flipSettleT0 < FLIP_SETTLE_MS) return;
+    flipPhase = null;
+    let top = 0;
+    for (let i = 0; i < N; i++) if (posCache[i * 3 + 1] * orientation > 0.35) top++;
+    topStart = top;
+    clockEl.classList.remove('done');
+    if (top === 0) { effDuration = baseDuration; state = 'ready'; setStatus('empty — flip again'); updateButtons(); return; }
+    // a real hourglass flipped mid-run only runs for the fraction on top
+    effDuration = Math.max(1, baseDuration * (top / Math.max(1, N)));
+    elapsedMs = 0;
+    beginRun();
+  }
+}
+
+/* ============================================================ *
+ *  Audio — flowing-sand noise + completion chime
+ * ============================================================ */
+let audioCtx = null, noiseGain = null, muted = false;
+function ensureAudio() {
+  if (muted) return;
+  if (audioCtx) { if (audioCtx.state === 'suspended') audioCtx.resume(); return; }
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const len = audioCtx.sampleRate * 2;
+    const buf = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    const bp = audioCtx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = 3400; bp.Q.value = 0.6;
+    noiseGain = audioCtx.createGain(); noiseGain.gain.value = 0;
+    src.connect(bp).connect(noiseGain).connect(audioCtx.destination);
+    src.start();
+  } catch { /* audio unavailable — fine */ }
+}
+function updateNoise() {
+  if (!noiseGain) return;
+  const target = muted || state !== 'running' ? 0 : Math.min(0.055, inFlight * 0.0035);
+  noiseGain.gain.linearRampToValueAtTime(target, audioCtx.currentTime + 0.12);
+}
+function chime() {
+  if (!audioCtx || muted) return;
+  const t0 = audioCtx.currentTime;
+  for (const [f, dt, dur] of [[659.25, 0, 0.9], [880, 0.18, 1.3]]) {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = 'sine'; o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, t0 + dt);
+    g.gain.exponentialRampToValueAtTime(0.12, t0 + dt + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + dur);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(t0 + dt); o.stop(t0 + dt + dur + 0.1);
+  }
+}
+
+/* ============================================================ *
+ *  UI wiring
+ * ============================================================ */
+function setStatus(s) { statusEl.textContent = s; }
+function fmt(secs) {
+  secs = Math.max(0, secs);
+  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60);
+  const s = Math.floor(secs % 60);
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  if (secs < 10 && state === 'running') return `${m}:${String(s).padStart(2, '0')}.${Math.floor((secs % 1) * 10)}`;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+function updateButtons() {
+  const busy = state === 'settling' || state === 'boot' || !!flipPhase;
+  startBtn.disabled = busy || state === 'done' || (state === 'ready' && topStart === 0);
+  startBtn.textContent = state === 'running' ? 'Pause' : state === 'paused' ? 'Resume' : 'Start';
+  flipBtn.disabled = busy;
+  resetBtn.disabled = busy;
+  for (const b of document.querySelectorAll('#presets .chip')) b.disabled = busy;
+  const inp = $('customMin');
+  inp.disabled = busy;
+  if (busy) inp.blur();
+}
+
+document.getElementById('presets').addEventListener('click', (e) => {
+  const chip = e.target.closest('.chip');
+  if (!chip || chip.disabled) return;
+  document.querySelectorAll('#presets .chip').forEach((c) => c.classList.toggle('active', c === chip));
+  $('customMin').value = '';
+  applyDuration(Number(chip.dataset.secs));
+});
+$('customMin').addEventListener('change', () => {
+  if (state === 'settling' || state === 'boot' || flipPhase) return;
+  const v = parseFloat($('customMin').value);
+  if (!Number.isFinite(v) || v <= 0) return;
+  document.querySelectorAll('#presets .chip').forEach((c) => c.classList.remove('active'));
+  applyDuration(Math.min(180, Math.max(0.25, v)) * 60); // ≥15s keeps the neck flow physical
+});
+
+startBtn.addEventListener('click', () => {
+  if (state === 'ready') beginRun();
+  else if (state === 'running') { state = 'paused'; updateButtons(); setStatus('paused'); }
+  else if (state === 'paused') {
+    const newStamp = performance.now() - elapsedMs;
+    // shift jam-timeout clocks by the paused wall time so resume doesn't mass-teleport
+    const pausedMs = newStamp - startStamp;
+    for (const i of inFlightSet) releasedAt[i] += pausedMs;
+    startStamp = newStamp;
+    state = 'running'; updateButtons(); setStatus('flowing');
+  }
+});
+flipBtn.addEventListener('click', startFlip);
+resetBtn.addEventListener('click', fullReset);
+muteBtn.addEventListener('click', () => {
+  muted = !muted;
+  muteBtn.textContent = muted ? '🔇' : '🔊';
+  if (!muted) ensureAudio();
+});
+window.addEventListener('keydown', (e) => {
+  if (e.repeat || e.target.tagName === 'INPUT') return;
+  if (e.code === 'Space') { e.preventDefault(); startBtn.click(); }
+  else if (e.key === 'f' || e.key === 'F') flipBtn.click();
+  else if (e.key === 'r' || e.key === 'R') resetBtn.click();
+});
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(degraded ? 1 : Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && audioCtx?.state === 'suspended' && !muted) audioCtx.resume();
+});
+
+/* ============================================================ *
+ *  Render / physics loop
+ * ============================================================ */
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _s = new THREE.Vector3(1, 1, 1);
+function syncInstances(force = false) {
+  let dirty = false;
+  for (let i = 0; i < N; i++) {
+    if (!force && bodies[i].isSleeping()) continue;
+    const t = bodies[i].translation(), r = bodies[i].rotation();
+    posCache[i * 3] = t.x; posCache[i * 3 + 1] = t.y; posCache[i * 3 + 2] = t.z;
+    _v.set(t.x, t.y, t.z);
+    _q.set(r.x, r.y, r.z, r.w);
+    _m.compose(_v, _q, _s);
+    grainMesh.setMatrixAt(i, _m);
+    dirty = true;
+  }
+  if (dirty) grainMesh.instanceMatrix.needsUpdate = true;
+}
+
+let acc = 0, lastT = 0, fps = 60, statsTimer = 0, frame = 0;
+let lowFpsMs = 0, degraded = false;
+function loop(now) {
+  requestAnimationFrame(loop);
+  const gap = lastT ? (now - lastT) / 1000 : 0.016;
+  const dtReal = Math.min(0.05, gap);
+  lastT = now;
+  fps = fps * 0.95 + (1 / Math.max(1e-3, dtReal)) * 0.05;
+  frame++;
+
+  if (state === 'settling') {
+    settleTick(gap);
+  } else if (state !== 'paused' && state !== 'boot') {
+    if (flipPhase) flipTick(now);
+    // throttled tabs: simulate up to 1s of the real gap so motion stays coherent
+    acc += Math.min(1.0, gap);
+    let steps = 0;
+    const allow = Math.max(MAX_STEPS, Math.min(120, Math.round(gap / DT)));
+    while (acc >= DT && steps < allow) { world.step(); acc -= DT; steps++; }
+    if (acc > DT) acc = 0;
+    clampVelocities();
+    if (state === 'running' && !flipPhase) meterTick(now);
+    if (!flipPhase) trackGrains(now);
+    if (frame % 12 === 0) rescueSweep();
+    if (frame % 150 === 0 && (state === 'running' || state === 'done')) supportSweep();
+  }
+
+  if (world) syncInstances();
+  updateNoise();
+
+  if (state === 'running') clockEl.textContent = fmt(effDuration - elapsedMs / 1000);
+  else if (state === 'done') clockEl.textContent = fmt(0);
+  else if (state === 'paused') clockEl.textContent = fmt(effDuration - elapsedMs / 1000);
+  else clockEl.textContent = fmt(effDuration);
+
+  statsTimer += dtReal;
+  if (statsTimer > 0.25) {
+    statsTimer = 0;
+    const rate = topStart && effDuration ? (topStart / Math.max(1, effDuration - TRANSIT_S)).toFixed(1) : '0';
+    statsEl.textContent =
+      `${passed.toLocaleString()} / ${topStart.toLocaleString()} grains through · ${rate}/s · ${Math.round(fps)} fps` +
+      (escaped ? ` · rescued ${escaped}` : '');
+  }
+
+  // sustained slow frames while running → cheaper glass + native resolution
+  if (state === 'running' && fps < 42) lowFpsMs += dtReal * 1000; else lowFpsMs = 0;
+  if (lowFpsMs > 4000 && !degraded) {
+    degraded = true;
+    glass.material = cheapGlassMat;
+    glassMat.dispose(); // one-way swap; r164 keeps its internal transmission target until renderer.dispose()
+    renderer.setPixelRatio(1);
+    console.info('performance fallback: simplified glass material');
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+/* ============================================================ *
+ *  Boot
+ * ============================================================ */
+(async () => {
+  try {
+    overlayText.textContent = 'Waking the physics engine…';
+    await RAPIER.init();
+    world = new RAPIER.World({ x: 0, y: -G, z: 0 });
+    world.timestep = DT;
+    buildStaticColliders();
+    overlayText.textContent = 'Pouring the sand…';
+    buildSand(grainBudget(baseDuration));
+    syncInstances(true);
+    beginSettle('ready');
+    requestAnimationFrame(loop);
+
+    // debug/verification handle (harmless in production)
+    window.__hg = {
+      get state() { return state; }, get passed() { return passed; },
+      get inFlight() { return inFlight; }, get topStart() { return topStart; },
+      get N() { return N; }, get escaped() { return escaped; },
+      get fps() { return fps; }, get elapsed() { return elapsedMs / 1000; },
+      get effDuration() { return effDuration; }, get orientation() { return orientation; },
+      get awake() { let n = 0; for (let i = 0; i < N; i++) if (!bodies[i].isSleeping()) n++; return n; },
+      grainY(i) { return posCache[i * 3 + 1]; },
+      snap(q = 0.8) { renderer.render(scene, camera); return renderer.domElement.toDataURL('image/jpeg', q); },
+    };
+  } catch (err) {
+    console.error(err);
+    fatal(
+      'Could not start the simulation. This page loads three.js and the Rapier physics engine from a CDN — make sure you are online (first load), then refresh. ' +
+      'Serve the folder over HTTP if your browser blocks modules from file://. (' + (err?.message || err) + ')'
+    );
+  }
+})();
+</script>
+</body>
+</html>
