@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ChronoBench — Digital Twin Timers</title>
+<style>
+  :root {
+    --sand: #d9a95c;
+    --sand-bright: #f0c987;
+    --ink: #e8e4dc;
+    --ink-dim: #9a958b;
+    --panel: rgba(20, 22, 30, 0.55);
+    --stroke: rgba(255, 255, 255, 0.10);
+    --good: #7fd08f;
+    --bad: #e08a7a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+    background: radial-gradient(120% 90% at 50% 30%, #1a1d27 0%, #0c0e15 55%, #050609 100%);
+    color: var(--ink);
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #scene { position: fixed; inset: 0; display: block; touch-action: none; }
+
+  header { position: fixed; top: 22px; left: 28px; z-index: 5; pointer-events: none; }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.32em; }
+  header h1 span { display: block; font-size: 10px; font-weight: 400; letter-spacing: 0.24em; color: var(--ink-dim); margin-top: 4px; }
+
+  #readout { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); text-align: center; z-index: 5; pointer-events: none; }
+  #clock {
+    font-size: clamp(40px, 6vw, 58px); font-weight: 200;
+    font-variant-numeric: tabular-nums; letter-spacing: 0.04em;
+    text-shadow: 0 2px 24px rgba(0,0,0,0.6); transition: color 0.4s;
+  }
+  #clock.done { color: var(--sand-bright); }
+  #status { font-size: 11px; letter-spacing: 0.28em; text-transform: uppercase; color: var(--ink-dim); margin-top: 2px; }
+  #blurb { font-size: 11px; color: var(--ink-dim); margin-top: 6px; max-width: 420px; }
+
+  #tabs {
+    position: fixed; top: 24px; right: 76px; z-index: 6;
+    display: flex; gap: 6px;
+  }
+  .tab {
+    padding: 8px 14px; border-radius: 12px; font-size: 13px; font-weight: 500;
+    background: var(--panel); border: 1px solid var(--stroke); color: var(--ink-dim);
+    cursor: pointer; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    transition: all 0.15s; white-space: nowrap;
+  }
+  .tab:hover { color: var(--ink); }
+  .tab.active { background: rgba(217,169,92,0.16); border-color: var(--sand); color: var(--sand-bright); }
+  .tab:disabled { opacity: 0.4; cursor: default; }
+
+  #muteBtn {
+    position: fixed; top: 24px; right: 28px; z-index: 6;
+    width: 40px; height: 40px; border-radius: 50%;
+    background: var(--panel); border: 1px solid var(--stroke);
+    color: var(--ink-dim); font-size: 16px; cursor: pointer;
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  }
+
+  #panel {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+    z-index: 5; display: flex; flex-direction: column; gap: 10px; align-items: center;
+    padding: 14px 20px; border-radius: 20px;
+    background: var(--panel); border: 1px solid var(--stroke);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+    max-width: min(94vw, 680px);
+  }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  .chip {
+    padding: 7px 15px; border-radius: 999px; font-size: 13px; font-weight: 500;
+    background: rgba(255,255,255,0.05); border: 1px solid var(--stroke);
+    color: var(--ink-dim); cursor: pointer; transition: all 0.15s;
+  }
+  .chip:hover { color: var(--ink); }
+  .chip.active { background: rgba(217,169,92,0.16); border-color: var(--sand); color: var(--sand-bright); }
+  #customMin {
+    width: 60px; padding: 7px 10px; border-radius: 999px; font-size: 13px;
+    background: rgba(255,255,255,0.05); border: 1px solid var(--stroke);
+    color: var(--ink); outline: none; text-align: center;
+  }
+  .btn {
+    padding: 10px 22px; border-radius: 12px; font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: all 0.15s;
+    background: rgba(255,255,255,0.07); border: 1px solid var(--stroke); color: var(--ink);
+  }
+  .btn:hover:not(:disabled) { background: rgba(255,255,255,0.13); }
+  .btn:disabled { opacity: 0.35; cursor: default; }
+  .btn.primary { background: linear-gradient(160deg, #e3b269, #b97f35); color: #221503; border-color: transparent; }
+  #stats { font-size: 11px; letter-spacing: 0.06em; color: var(--ink-dim); font-variant-numeric: tabular-nums; text-align: center; }
+
+  #paramsRow { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  .param { display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--ink-dim); }
+  .param input[type=range] { width: 110px; accent-color: var(--sand); }
+  .param select {
+    background: rgba(255,255,255,0.05); border: 1px solid var(--stroke); color: var(--ink);
+    border-radius: 8px; padding: 4px 8px; font-size: 12px;
+  }
+  .param .val { min-width: 34px; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  #bench {
+    position: fixed; right: 28px; bottom: 26px; z-index: 5;
+    width: 300px; padding: 12px 14px; border-radius: 16px;
+    background: var(--panel); border: 1px solid var(--stroke);
+    backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  }
+  #bench h3 { font-size: 10px; letter-spacing: 0.24em; color: var(--ink-dim); font-weight: 600; margin-bottom: 8px; }
+  #benchChart { width: 100%; height: 130px; display: block; }
+  #benchLegend { font-size: 10.5px; color: var(--ink-dim); margin-top: 6px; display: flex; justify-content: space-between; }
+  #benchErr { font-variant-numeric: tabular-nums; }
+  @media (max-width: 900px) { #bench { display: none; } #tabs { right: 28px; top: 74px; } }
+
+  #overlay {
+    position: fixed; inset: 0; z-index: 20; display: flex;
+    align-items: center; justify-content: center;
+    background: rgba(5, 6, 9, 0.78); backdrop-filter: blur(6px); transition: opacity 0.5s;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  #overlay .card { text-align: center; width: 300px; }
+  #overlay .glass-icon { font-size: 44px; animation: turn 2.4s ease-in-out infinite; display: inline-block; }
+  @keyframes turn { 0%, 60% { transform: rotate(0); } 90%, 100% { transform: rotate(180deg); } }
+  #overlayText { margin: 16px 0 0; font-size: 13px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-dim); }
+  #err { color: var(--bad); font-size: 13px; line-height: 1.6; display: none; margin-top: 10px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/",
+    "@dimforge/rapier3d-simd-compat": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-simd-compat@0.19.3/rapier.mjs"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<header><h1>CHRONOBENCH<span>DIGITAL TWIN TIMERS · A TEST BENCH</span></h1></header>
+
+<div id="readout">
+  <div id="clock">01:00</div>
+  <div id="status">preparing</div>
+  <div id="blurb"></div>
+</div>
+
+<div id="tabs"></div>
+<button id="muteBtn" title="toggle sound">🔊</button>
+
+<div id="panel">
+  <div class="row" id="presets">
+    <button class="chip" data-secs="15">15 sec</button>
+    <button class="chip active" data-secs="60">1 min</button>
+    <button class="chip" data-secs="300">5 min</button>
+    <button class="chip" data-secs="3600">60 min</button>
+    <input id="customMin" type="number" min="0.25" max="180" step="any" placeholder="min" title="custom minutes" />
+  </div>
+  <div class="row" id="paramsRow"></div>
+  <div class="row">
+    <button class="btn primary" id="startBtn">Start</button>
+    <button class="btn" id="flipBtn">⟲ Flip</button>
+    <button class="btn" id="resetBtn">Reset</button>
+  </div>
+  <div id="stats">—</div>
+</div>
+
+<div id="bench">
+  <h3>THE BENCH — TWIN vs LAW</h3>
+  <canvas id="benchChart"></canvas>
+  <div id="benchLegend"><span id="benchLaw">—</span><span id="benchErr">—</span></div>
+</div>
+
+<div id="overlay">
+  <div class="card">
+    <span class="glass-icon">⌛</span>
+    <p id="overlayText">Preparing…</p>
+    <p id="err"></p>
+  </div>
+</div>
+
+<script type="module" src="./core/app.js"></script>
+</body>
+</html>
