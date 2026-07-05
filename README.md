@@ -112,6 +112,23 @@ LICENSE           MIT
 - In heavily throttled/background tabs the sand reconciles via banded catch-up
   releases; the countdown itself is always wall-clock exact.
 
+## ChronoBench — the multi-world test bench
+
+[`/bench/`](bench/) generalizes the experiment: **each timekeeping device hides a
+different physical law**, and a live chart plots the twin's measured drain curve
+against the analytic law — the benchmark grades itself. Four worlds on one core
+(shared wall clock, renderer, pluggable world modules — see
+[`bench/core/WORLD_CONTRACT.md`](bench/core/WORLD_CONTRACT.md)):
+
+| World | Hidden law | The twin must… |
+| --- | --- | --- |
+| ⌛ Hourglass | Beverloo: constant granular rate | drain **linearly** (freeze-plug metering, live flip) |
+| 🔬 Granule Lab | Beverloo rate ∝ (D−1.4d)^2.5, jams below D/d≈5 | flow **emergently** — no metering; sliders for grain & aperture |
+| 💧 Water Clock | Torricelli: outflow ∝ √h | slow down as it drains; the fix is vessel shape r ∝ h^¼ |
+| 🕯️ Candle Clock | steady combustion | burn linearly — height *is* time |
+
+Live: https://khanmjk.github.io/Hourglass_Fable5/bench/
+
 ## V1 → V2
 
 V1 (see git history) metered sand through a collision-filtered gate that grains
